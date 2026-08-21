@@ -1,0 +1,455 @@
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{physics}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{siunitx}
+\usepackage{hyperref}
+\usepackage[margin=1in]{geometry}
+\usepackage{xcolor}
+\usepackage{listings}
+\usepackage{enumitem}
+\usepackage{fancyhdr}
+\usepackage{titlesec}
+
+\hypersetup{
+    colorlinks=true,
+    linkcolor=blue!60!black,
+    urlcolor=blue!60!black,
+    citecolor=blue!60!black,
+    pdftitle={PY-BEMCS Physics Reference and User Manual},
+    pdfauthor={Dr. Bharat Singh Rawat}
+}
+
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[L]{PY-BEMCS Reference Manual}
+\fancyhead[R]{\thepage}
+\fancyfoot[C]{\small Python Beam Extraction \& Monte Carlo Simulator}
+
+\titleformat{\section}{\Large\bfseries\color{blue!50!black}}{\thesection}{1em}{}
+\titleformat{\subsection}{\large\bfseries\color{blue!40!black}}{\thesubsection}{1em}{}
+\titleformat{\subsubsection}{\normalsize\bfseries\color{blue!30!black}}{\thesubsubsection}{1em}{}
+
+\newcommand{\PYBEMCS}{PY-BEMCS}
+
+\lstset{
+    basicstyle=\small\ttfamily,
+    backgroundcolor=\color{gray!10},
+    frame=single,
+    breaklines=true,
+    captionpos=b
+}
+
+\begin{document}
+
+% ---------------------- TITLE ----------------------
+\begin{titlepage}
+\centering
+\vspace*{2cm}
+
+{\Huge\bfseries Python Beam Extraction \&\\[0.3em] Monte Carlo Simulator \par}
+\vspace{0.5cm}
+{\Large\bfseries (\PYBEMCS)\par}
+
+\vspace{1.2cm}
+{\large\textit{Comprehensive Physics Reference and User Manual}\par}
+
+\vspace{2.5cm}
+{\large Dr.~Bharat Singh Rawat\par}
+\vspace{0.2cm}
+{\normalsize \href{mailto:bharat.bharat22@gmail.com}{bharat.bharat22@gmail.com}\par}
+
+\vspace{1.5cm}
+{\normalsize \textbf{Version 2.0 (Extended Modular Release)}\par}
+\vspace{0.2cm}
+{\normalsize \today\par}
+
+\vfill
+\hrule
+\vspace{0.5em}
+{\small Open-Source 2D3V Electrostatic Particle-in-Cell, Plume MCC, Thermo-Mechanical Grid Erosion, \& Multi-Core Benchmarking Suite}
+\end{titlepage}
+
+% ---------------------- ABSTRACT ----------------------
+\begin{center}
+{\Large\bfseries Abstract}
+\end{center}
+\vspace{0.5em}
+
+\PYBEMCS{} is an open-source 2D3V (two spatial, three velocity components) electrostatic Particle-in-Cell (PIC) and Monte Carlo Collision (MCC) simulation suite engineered for ion thruster optics, neutral beam injectors (NBI), and advanced plasma extraction systems. This document provides a complete mathematical, physical, and numerical specification of the simulator, together with comprehensive user guidelines for the graphical interface, headless batch solvers, and automated multi-core benchmarking scripts.
+
+Key capabilities detailed in this manual include:
+\begin{itemize}[nosep]
+    \item Self-consistent Bohm extraction from upstream plasma sheaths with space-charge Poisson solves and Boltzmann electron screening.
+    \item 2D3V relativistic Boris particle advancement with dual Taichi GPU/CPU accelerated and pure-NumPy fallback kernels.
+    \item Charge-Exchange (CEX) collision dynamics using Roy's neutral plume model or user-imported experimental cross-section datasets with log-log cubic spline smoothing.
+    \item In-situ sputter erosion modeling (Matsunami yield formulation) coupled with live grid mesh boundary deletion.
+    \item Coupled 2D thermal conduction, Stefan--Boltzmann radiative cooling, and Euler--Bernoulli cantilever thermo-mechanical grid aperture deflection.
+    \item Modular JSON configuration architecture (\texttt{config.json}) supporting arbitrary $N$-grid configurations, discharge chamber plasma dynamics, and live parameter reloading.
+    \item Automated multi-core parallel benchmarking suite for CEX erosion rates, Electron Backstreaming (EBS) limits, primary beam impingement / grid scraping, and perveance-divergence curves.
+    \item Built-in asynchronous standalone application packager (\texttt{PyInstallerWorker}) embedded directly in the GUI.
+\end{itemize}
+
+\vspace{1em}
+\hrule
+\vspace{1em}
+
+\tableofcontents
+\newpage
+
+% =====================================================
+\section{Computational Framework and Architecture}
+% =====================================================
+
+\subsection{Coordinate System and Discretisation}
+
+The computational domain employs a 2D Cartesian grid in $(x, y)$, where $x$ represents the primary axial beam extraction coordinate and $y$ corresponds to the transverse/radial coordinate (half-aperture or axisymmetric slice). The domain extents are defined by $L_x \times L_y$ with uniform cell spacing $\Delta x \times \Delta y$:
+\begin{equation}
+    n_x = \left\lfloor\frac{L_x}{\Delta x}\right\rfloor + 1, \qquad
+    n_y = \left\lfloor\frac{L_y}{\Delta y}\right\rfloor + 1.
+\end{equation}
+By default, $\Delta x = \Delta y = \SI{0.02}{\milli\meter}$ ($\SI{20}{\micro\meter}$), ensuring the grid spacing resolves the local Debye length throughout the sheath region while preserving computational tractability.
+
+Every macroparticle stores three-dimensional velocity components $\vb{v} = (v_x, v_y, v_z)$. While spatial motion is constrained to the $(x, y)$ plane, $v_z$ is rigorously advanced in time during magnetic rotations and collisional scattering.
+
+\subsection{Dual-Kernel Execution Engine (Taichi GPU + CPU Fallback)}
+
+To combine peak GPU performance on workstation hardware with maximum portability across containerized or headless computing clusters, \PYBEMCS{} implements a dual-kernel architecture:
+\begin{enumerate}[nosep]
+    \item \textbf{Taichi Backend (GPU/CPU)}: When Taichi is initialized, particle pushes, bilinear charge deposition, and explicit thermal conduction compile into parallel GPU kernels (CUDA, Metal, or Vulkan) running in 32-bit floating-point precision ($\texttt{ti.f32}$).
+    \item \textbf{Vectorised CPU Fallback Kernels}: If Taichi is not present (or when running inside frozen executable packages), the physics engine automatically activates vectorised CPU routines (\texttt{accumulate\_rho\_cpu}, \texttt{push\_particles\_boris\_cpu}) using optimized NumPy array operations.
+\end{enumerate}
+
+% =====================================================
+\section{Particle-in-Cell Electrostatic Algorithm}
+% =====================================================
+
+\subsection{Self-Consistent Poisson--Boltzmann Solver}
+
+The electrostatic potential $\phi(\vb{x})$ is governed by Poisson's equation including macroparticle ion density and thermalized Boltzmann electrons:
+\begin{equation}
+    \nabla^{2}\phi(\vb{x}) \;=\; -\,\frac{1}{\varepsilon_{0}}
+        \left[ q_{\mathrm{i}}\,n_{\mathrm{i}}(\vb{x}) - e\,n_{\mathrm{e}}(\vb{x}) \right],
+    \label{eq:poisson}
+\end{equation}
+where $q_{\mathrm{i}} = Z e$ is the ion charge, $n_{\mathrm{i}}$ is the deposited ion macroparticle number density, and the electron density $n_{\mathrm{e}}$ follows the non-linear Boltzmann relation:
+\begin{equation}
+    n_{\mathrm{e}}(\vb{x}) \;=\; n_{0}\,
+    \exp\!\left[\frac{\min(\phi(\vb{x}),\,\phi_{\mathrm{pl}}) - \phi_{\mathrm{pl}}}{T_{\mathrm{e}}}\right],
+    \label{eq:boltzmann}
+\end{equation}
+with $T_{\mathrm{e}}$ in electron-volts ($\si{\eV}$), $n_0$ the upstream plasma density, and $\phi_{\mathrm{pl}}$ the reference plasma potential established at the upstream boundary ($x = 0$). The clipping operator $\min(\phi, \phi_{\mathrm{pl}})$ prevents non-physical exponential density blow-ups in regions where local potential excursions exceed the upstream plasma potential.
+
+Equation~\eqref{eq:poisson} is discretised on the uniform mesh via a standard 5-point finite-difference stencil:
+\begin{equation}
+    \frac{\phi_{i+1,j} - 2\phi_{i,j} + \phi_{i-1,j}}{(\Delta x)^2} +
+    \frac{\phi_{i,j+1} - 2\phi_{i,j} + \phi_{i,j-1}}{(\Delta y)^2}
+    = -\frac{\rho_{i,j}}{\varepsilon_{0}}.
+\end{equation}
+The resulting sparse linear system $A \boldsymbol{\phi} = \mathbf{b}$ is factorised using SuperLU sparse LU decomposition. Non-linear electron space charge is converged via successive under-relaxation with relaxation parameter $\omega = 0.2$.
+
+\subsection{Bilinear Charge Deposition}
+
+Macroparticle charge is mapped to the four surrounding mesh nodes using bilinear interpolation weights. For a particle located at $(x_p, y_p)$ with grid indices $i = \lfloor x_p/\Delta x \rfloor$, $j = \lfloor y_p/\Delta y \rfloor$:
+\begin{align}
+    h_x &= \frac{x_p - i\Delta x}{\Delta x}, \qquad
+    h_y = \frac{y_p - j\Delta y}{\Delta y},\\
+    \rho_{i,j}     &\mathrel{+}= \frac{q_{\mathrm{i}} w}{V_{\mathrm{cell}}}\,(1-h_x)(1-h_y),\\
+    \rho_{i+1,j}   &\mathrel{+}= \frac{q_{\mathrm{i}} w}{V_{\mathrm{cell}}}\,h_x(1-h_y),\\
+    \rho_{i,j+1}   &\mathrel{+}= \frac{q_{\mathrm{i}} w}{V_{\mathrm{cell}}}\,(1-h_x)h_y,\\
+    \rho_{i+1,j+1} &\mathrel{+}= \frac{q_{\mathrm{i}} w}{V_{\mathrm{cell}}}\,h_x h_y,
+\end{align}
+where $V_{\mathrm{cell}} = \Delta x \Delta y \Delta z$ is the cell volume with assumed unit transverse thickness $\Delta z = \SI{1}{\milli\meter}$, and $w$ is the statistical macroparticle weighting factor:
+\begin{equation}
+    w = \max\!\left(\frac{n_0 V_{\mathrm{cell}}}{N_{\mathrm{ppc}}},\; 10^{3}\right),
+\end{equation}
+with default nominal target $N_{\mathrm{ppc}} = 40$ particles per cell.
+
+\subsection{Electric Field Computation and Boris Pusher}
+
+Electric field components are evaluated at mesh nodes via second-order central differencing:
+\begin{equation}
+    E_{x,i,j} = -\frac{\phi_{i+1,j} - \phi_{i-1,j}}{2\Delta x}, \qquad
+    E_{y,i,j} = -\frac{\phi_{i,j+1} - \phi_{i,j-1}}{2\Delta y},
+\end{equation}
+and interpolated to particle positions. Particle trajectories are advanced using the explicit leap-frog Boris method~\cite{birdsall}:
+\begin{align}
+    \vb{v}^{-} &= \vb{v}^{n-1/2} + \frac{q\,\vb{E}}{2m}\,\Delta t,\\
+    \vb{t} &= \frac{q\,\vb{B}}{2m}\,\Delta t, \qquad
+    \vb{s} = \frac{2\,\vb{t}}{1 + |\vb{t}|^2},\\
+    \vb{v}' &= \vb{v}^{-} + \vb{v}^{-} \times \vb{t},\\
+    \vb{v}^{+} &= \vb{v}^{-} + \vb{v}' \times \vb{s},\\
+    \vb{v}^{n+1/2} &= \vb{v}^{+} + \frac{q\,\vb{E}}{2m}\,\Delta t,\\
+    \vb{x}^{n+1} &= \vb{x}^{n} + \vb{v}^{n+1/2}\,\Delta t.
+\end{align}
+This scheme guarantees exact conservation of phase-space volume and energy conservation in static magnetic fields.
+
+% =====================================================
+\section{Plasma Injection and Bohm Optics}
+% =====================================================
+
+\subsection{Bohm Sheath Extraction Criterion}
+
+Ions enter the computational domain through the upstream plasma boundary ($x = 0$) with an initial axial drift satisfying the Bohm sheath velocity criterion:
+\begin{equation}
+    v_{\mathrm{B}} = \sqrt{\frac{Z e T_{\mathrm{e}}}{m_{\mathrm{ion}}}}, \qquad
+    m_{\mathrm{ion}} = M_{\mathrm{amu}} \cdot u,
+    \label{eq:bohm}
+\end{equation}
+where $M_{\mathrm{amu}}$ is the ion mass in atomic mass units and $u = \SI{1.66054e-27}{\kilo\gram}$.
+
+The injected ion current across the open sheath area $A_{\mathrm{inj}}$ is:
+\begin{equation}
+    I_{\mathrm{ion}} = 0.61\, Z e n_{0} v_{\mathrm{B}} A_{\mathrm{inj}},
+\end{equation}
+where the prefactor $0.61 \approx \exp(-1/2)$ accounts for the quasi-neutral pre-sheath density drop. The number of macroparticles injected at each timestep $\Delta t$ is:
+\begin{equation}
+    N_{\mathrm{inj}} = \frac{I_{\mathrm{ion}} \Delta t}{Z e w} + \xi_{\mathrm{stochastic}},
+\end{equation}
+with stochastic remainder accumulation ensuring exact long-term current conservation.
+
+\subsection{Thermal Velocity Sampling}
+
+Thermal spread at the sheath boundary is sampled from a 3D Maxwellian distribution at ion temperature $T_{\mathrm{i}}$:
+\begin{equation}
+    v_x = v_{\mathrm{B}} + \zeta_x v_{\mathrm{th,i}}, \qquad
+    v_y = \zeta_y v_{\mathrm{th,i}}, \qquad
+    v_z = \zeta_z v_{\mathrm{th,i}},
+\end{equation}
+where $\zeta_{x,y,z} \sim \mathcal{N}(0, 1)$ are standard normal random variables, and $v_{\mathrm{th,i}} = \sqrt{Z e T_{\mathrm{i}} / m_{\mathrm{ion}}}$.
+
+% =====================================================
+\section{Multiphysics Grid Models}
+% =====================================================
+
+\subsection{Arbitrary $N$-Grid Geometry Specification}
+
+The extraction optics consist of an arbitrary sequence of $N$ conducting grids defined by:
+\begin{itemize}[nosep]
+    \item DC potential $V_k$ (\si{\volt})
+    \item Thickness $t_k$ (\si{\milli\meter})
+    \item Inter-grid axial gap to subsequent grid $g_k$ (\si{\milli\meter})
+    \item Aperture radius $r_k$ (\si{\milli\meter})
+    \item Upstream chamfer angle $\theta_k$ (\si{\degree})
+\end{itemize}
+
+Solid boundary masks $\mathcal{M}_k(x,y)$ are dynamically synthesised and rasterised onto the finite-difference mesh.
+
+\subsection{Cantilever Thermo-Mechanical Grid Deformation}
+
+Under intense ion impingement and radiative heating, individual grid membranes experience substantial temperature rises $\Delta T_k = T_k - T_{\infty}$. Each grid is modeled as an annular plate segment undergoing Euler--Bernoulli cantilever bending clamped at the outer boundary ($y = L_y$) and free at the aperture edge ($y = r_k$):
+\begin{equation}
+    \delta_{\max,k} = \frac{\alpha_k \Delta T_k L_k^2}{2 t_k}, \qquad L_k = L_y - r_k,
+\end{equation}
+where $\alpha_k$ is the linear thermal expansion coefficient ($\si{\per\kelvin}$). The transverse displacement profile:
+\begin{equation}
+    \delta(y) = \delta_{\max,k} \left(\frac{L_y - y}{L_k}\right)^2,
+\end{equation}
+is dynamically added as an axial coordinate distortion to the grid boundaries. Whenever cumulative structural deformation exceeds $\SI{5}{\micro\meter}$, the Poisson sparse matrix operator is automatically re-factored.
+
+\subsection{2D Thermal Diffusion and Radiative Dissipation}
+
+Thermal energy deposition from impacting ions is balanced by 2D conduction within the grid solid mask and Stefan--Boltzmann radiative cooling to space:
+\begin{equation}
+    \rho_k c_{p,k} \frac{\partial T}{\partial t} = k_k \left(\frac{\partial^2 T}{\partial x^2} + \frac{\partial^2 T}{\partial y^2}\right) + \dot{q}_{\mathrm{dep}} - \frac{\varepsilon_k \sigma_{\mathrm{SB}}}{\Delta z}\left(T^4 - T_{\infty}^4\right),
+\end{equation}
+where $k_k$ is thermal conductivity, $c_{p,k}$ is specific heat capacity, $\varepsilon_k$ is surface emissivity, $\sigma_{\mathrm{SB}} = \SI{5.67e-8}{\watt\per\meter\squared\per\kelvin\tothe{4}}$, and $T_{\infty} = \SI{300}{\kelvin}$.
+
+% =====================================================
+\section{Collisions and Sputter Erosion}
+% =====================================================
+
+\subsection{Charge-Exchange (CEX) Dynamics and Plume Neutral Model}
+
+Neutral gas density distribution throughout the grid gap and downstream region follows Roy's analytical plume expansion model~\cite{roy}:
+\begin{equation}
+    n_{\mathrm{n}}(x,y) = n_{\mathrm{n},0} \, a \left[1 - \frac{1}{\sqrt{1 + (r_T / R)^2}}\right] \cos\theta,
+\end{equation}
+with $R = \sqrt{y^2 + (x + r_T)^2}$, $\theta = \arctan(y / (x + r_T))$, and normalisation factor $a = (1 - 1/\sqrt{2})^{-1}$.
+
+The null-collision Monte Carlo collision (MCC) probability for an ion traversing distance $\Delta s = |\vb{v}|\Delta t$ is:
+\begin{equation}
+    P_{\mathrm{CEX}} = 1 - \exp\left[-n_{\mathrm{n}}(x,y) \, \sigma_{\mathrm{CEX}}(E) \, |\vb{v}| \, \Delta t\right].
+\end{equation}
+The analytical xenon CEX cross-section formulation is:
+\begin{equation}
+    \sigma_{\mathrm{CEX}}(g) = \left[-0.8821\ln(g) + 15.1262\right]^2 \times 10^{-20} \;\si{\meter\squared},
+\end{equation}
+where $g = |\vb{v}|$ is relative collision speed. If custom cross-section CSV tables are imported, this formula is dynamically superseded by cubic spline interpolation in $\log_{10}(E)$--$\log_{10}(\sigma)$ space.
+
+\subsection{Sputter Yield and Dynamic Cell Removal}
+
+Erosion of grid boundaries under ion bombardment is governed by the empirical Matsunami sputtering yield relation~\cite{matsunami}:
+\begin{equation}
+    Y(E) = \min\!\left[Y_0 \left(E_{\mathrm{eV}} - E_{\mathrm{th}}\right)^{1.5},\; 1.0\right],
+\end{equation}
+where $Y_0$ is the sputter yield coefficient and $E_{\mathrm{th}}$ is the sputtering threshold energy ($\si{\eV}$).
+
+Cumulative damage per cell is accumulated as:
+\begin{equation}
+    D_{i,j} \mathrel{+}= Y(E) \cdot \kappa_{\mathrm{acc}},
+\end{equation}
+where $\kappa_{\mathrm{acc}}$ is the numerical time-acceleration factor. When $D_{i,j} \ge D_{\mathrm{fail}}$, the grid cell is removed from the solid mask, exposing new interior nodes and updating the field solver in real time.
+
+% =====================================================
+\section{Modular Configuration Architecture (\texttt{config.json})}
+% =====================================================
+
+The simulator parameters are managed through a unified, hierarchical JSON structure (\texttt{config.json}). A representative configuration is shown below:
+
+\begin{lstlisting}[language=json,caption={Standard \texttt{config.json} structure}]
+{
+  "beam_species": {
+    "mass_amu": 131.293,
+    "charge_state": 1
+  },
+  "grid_material": {
+    "preset": "Molybdenum"
+  },
+  "simulation": {
+    "n0_plasma": 7.73e17,
+    "Te_up": 8.5,
+    "Ti": 0.034,
+    "Tn": 400.0,
+    "n0": 5.27e18,
+    "Accel": 0.5,
+    "Thresh": 10000.0,
+    "sim_mode": "Both",
+    "geometry": "half_hole"
+  },
+  "discharge_chamber": {
+    "radius_m": 0.02,
+    "length_m": 0.10,
+    "n_cusp": 4,
+    "pitch_mm": 3.0
+  },
+  "grids": [
+    { "V": 1300.0, "t": 1.2, "gap": 0.9, "r": 1.3, "cham": 20.0 },
+    { "V": -150.0, "t": 0.6, "gap": 0.5, "r": 0.8, "cham": 0.0 },
+    { "V": 50.0,   "t": 0.5, "gap": 4.0, "r": 1.2, "cham": 0.0 }
+  ],
+  "cross_sections": {
+    "cx_file": "",
+    "see_file": "",
+    "custom_file": "",
+    "spline_smoothing": 0.0
+  },
+  "terminal_output": {
+    "grid_temperatures": true,
+    "beam_divergence": true,
+    "saddle_point_potential": true,
+    "mean_particle_energy": true,
+    "iteration_time": true
+  }
+}
+\end{lstlisting}
+
+% =====================================================
+\section{Graphical User Interface and Features}
+% =====================================================
+
+\subsection{Menu Bar and Advanced Controls}
+
+\begin{itemize}
+    \item \textbf{Settings $\rightarrow$ Advanced Parameters...}: Configures neutralizer injection coordinates $(x_{\mathrm{n}}, r_{\mathrm{n}})$, plasma offset potential, and electron mass scaling ratio $\mathcal{R} = m_{\mathrm{ion}}/m_{\mathrm{e}}$.
+    \item \textbf{Settings $\rightarrow$ Open Config JSON...}: Interactive file browser to load external JSON configuration profiles.
+    \item \textbf{Settings $\rightarrow$ Reload config.json}: Hot-reloads configuration files from disk without restarting the application.
+    \item \textbf{Settings $\rightarrow$ Build .exe...}: Compiles the current Python source code into a standalone single-file binary executable using an asynchronous background thread with live milestone tracking.
+    \item \textbf{Beam $\rightarrow$ Ion Species...}: Configures beam ion atomic mass (amu) and ionization charge state ($+1, +2, \dots$) with predefined presets (Xe, Kr, Ar, N$_2$, O$_2$, H$_2$, He, Hg, Cs).
+    \item \textbf{Beam $\rightarrow$ Cross-Section Manager...}: Import external experimental CSV tables for CEX, SEE yield, or custom reaction channels with interactive log-log cubic spline fitting.
+    \item \textbf{Materials $\rightarrow$ Grid Material...}: Selects material presets (Molybdenum, Steel SS316, Titanium, Graphite) or custom thermophysical properties ($k, \rho, c_p, \varepsilon, \alpha, E, Y_0, E_{\mathrm{th}}$).
+\end{itemize}
+
+\subsection{Live Diagnostics and Data Export}
+
+\begin{itemize}[nosep]
+    \item \textbf{Beam Divergence Angle ($\theta_{95}$)}: Evaluated from the 95\textsuperscript{th} percentile of ion trajectory angles downstream of the last grid:
+    \begin{equation}
+        \theta_{95} = Q_{0.95}\!\left[\,\left|\arctan\left(\frac{v_y}{v_x}\right)\right|\,\right].
+    \end{equation}
+    \item \textbf{Electron Backstreaming (EBS) Saddle Potential}: Continuous monitoring of centerline potential in the accelerator aperture to verify backstreaming suppression ($V_{\mathrm{sp}} < -5\,\si{\volt}$).
+    \item \textbf{Ion Energy Distribution Function (IEDF)}: Live spectral histogram tracking particle energy distributions exiting the grid system.
+    \item \textbf{Asynchronous Data Exporters}: Background progress dialogs for exporting time-series simulation telemetry to CSV, particle phase-space archives, and animated GIF recordings.
+\end{itemize}
+
+% =====================================================
+\section{Multi-Core Benchmarking Suite (\texttt{benchmarks/})}
+% =====================================================
+
+The \texttt{benchmarks/} directory contains dedicated multi-core physics sweep scripts utilising Python's \texttt{multiprocessing} engine to execute parametric studies across independent CPU worker processes simultaneously:
+
+\begin{table}[h!]
+\centering
+\small
+\begin{tabular}{lp{6cm}p{4.5cm}}
+\toprule
+\textbf{Benchmark Script} & \textbf{Physics Objective} & \textbf{Generated Output} \\
+\midrule
+\texttt{benchmark\_cex.py} & Sputter erosion rate vs background neutral density ($n_{\mathrm{n}} = 10^{18}$--$5\times 10^{19}\,\si{\per\meter\cubed}$) across multiple grid gap configurations. & \texttt{cex\_benchmark\_multicore.png} \\
+\addlinespace
+\texttt{benchmark\_ebs.py} & Centerline saddle-point potential barrier vs accelerator grid voltage ($V_{\mathrm{a}} = -400$--$0\,\si{\volt}$) evaluating the EBS safety boundary. & \texttt{ebs\_benchmark\_multicore.png} \\
+\addlinespace
+\texttt{benchmark\_impingement.py} & Direct primary beam ion grid interception and scraping percentage vs perveance ($P = I_{\mathrm{ion}} / V_{\mathrm{tot}}^{1.5}$). & \texttt{impingement\_ratio\_benchmark.png} \\
+\addlinespace
+\texttt{benchmark\_perveance.py} & Beam divergence angle vs perveance over 60 plasma density increments across multiple grid gap spacings. & \texttt{divergence\_vs\_perveance\_benchmark\_multicore.png} \\
+\addlinespace
+\texttt{benchmark\_perveance\_Vs\_Sweep.py} & Beam divergence response as a function of screen grid extraction potential ($V_{\mathrm{s}} = 600$--$2000\,\si{\volt}$). & \texttt{divergence\_vs\_voltage\_benchmark.png} \\
+\bottomrule
+\end{tabular}
+\caption{Summary of multi-core benchmarking scripts.}
+\end{table}
+
+% =====================================================
+\section{Standalone Executable Compilation Architecture}
+% =====================================================
+
+The embedded executable builder (\texttt{Settings $\rightarrow$ Build .exe...}) runs PyInstaller asynchronously via the \texttt{PyInstallerWorker(QThread)} class. The compilation process proceeds without blocking the Qt event loop:
+\begin{enumerate}[nosep]
+    \item Spawns a dedicated background worker thread and builds inside a temporary directory (\texttt{\_exe\_build\_tmp/}) to keep the repository root clean.
+    \item Intercepts real-time standard output and maps build milestones (analysis, dependency collection, PYZ archive creation, binary packaging) to a 0--100\% progress dialog.
+    \item Automatically copies the resulting single-file executable and accompanying \texttt{config.json} into the user-selected destination directory.
+    \item Cleans up intermediate build artifacts upon completion or cancellation.
+\end{enumerate}
+
+% =====================================================
+\section{Summary of Execution Modes}
+% =====================================================
+
+\subsection{Interactive Graphical Run}
+\begin{lstlisting}[language=bash]
+python Python/main.py
+\end{lstlisting}
+
+\subsection{Headless Parameter Sweep Execution}
+\begin{lstlisting}[language=bash]
+python Python/run_simulation_from_config.py
+\end{lstlisting}
+
+\subsection{Parallel Multi-Core Benchmarks}
+\begin{lstlisting}[language=bash]
+python Python/benchmarks/benchmark_perveance.py
+python Python/benchmarks/benchmark_cex.py
+python Python/benchmarks/benchmark_ebs.py
+\end{lstlisting}
+
+% =====================================================
+\begin{thebibliography}{9}
+\bibitem{birdsall}
+C.~K. Birdsall and A.~B. Langdon,
+\textit{Plasma Physics via Computer Simulation},
+Institute of Physics Publishing, Bristol, 1991.
+
+\bibitem{roy}
+R.~I.~S. Roy, \textit{Numerical Simulation of Ion Thruster Plume Backflow}, Ph.D. Thesis, Massachusetts Institute of Technology, Cambridge, MA, 1995.
+
+\bibitem{matsunami}
+N.~Matsunami \textit{et al.},
+``Energy dependence of the yields of ion-induced sputtering of monatomic solids,'' \textit{Atomic Data and Nuclear Data Tables}, vol.~31, no.~1, pp.~1--80, 1984.
+\end{thebibliography}
+
+\end{document}
