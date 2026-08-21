@@ -1,9 +1,142 @@
 """
-This code handles the primary for the GUI/UI design. One can use this
-section to add or modify any new features to the screen.
+PY-BEMCS GUI
+All default parameters are loaded from config.json.
+No simulation defaults are imposed in this file.
 """
+
 import os
 import sys
+import json
+import csv
+import time
+import numpy as np
+import matplotlib
+matplotlib.use("Qt5Agg")
+import matplotlib.pyplot as plt
+
+from mpl_toolkits.axes_grid1 import make_axes_locatable
+from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
+from PyQt5.QtWidgets import (
+    QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
+    QLabel, QDoubleSpinBox, QPushButton, QCheckBox,
+    QMessageBox, QFileDialog, QApplication, QComboBox,
+    QScrollArea, QGroupBox, QAction, QDialog, QFormLayout,
+    QSpinBox, QTableWidget, QTableWidgetItem, QMenuBar,
+    QHeaderView, QSplitter, QProgressDialog
+)
+from PyQt5.QtCore import QTimer, Qt, QThread, pyqtSignal
+from PyQt5.QtCore import Qt as QtCore_Qt
+from PyQt5.QtGui import QImage
+from scipy.interpolate import UnivariateSpline
+
+from physics_engine import DigitalTwinSimulator
+
+
+class PyInstallerWorker(QThread):
+    """Runs PyInstaller in a background thread and reports progress via signals."""
+    progress_line = pyqtSignal(str)   # each new stdout/stderr line
+    progress_pct  = pyqtSignal(int)   # 0-100 estimated percentage
+    finished      = pyqtSignal(bool, str)  # (success, message)
+
+    # PyInstaller log lines that signal meaningful milestones (order matters)
+    _MILESTONES = [
+        ("checking python",         5),
+        ("running analysis",        10),
+        ("processing module hooks", 20),
+        ("looking for implied",     30),
+        ("copying dependencies",    40),
+        ("building pyz",            50),
+        ("building pkg",            60),
+        ("building exe",            70),
+        ("appending archive",       80),
+        ("building exe from",       85),
+        ("exe successfully",        95),
+    ]
+
+    def __init__(self, script_path: str, dest_dir: str, parent=None):
+        super().__init__(parent)
+        self._script_path = script_path
+        self._dest_dir    = dest_dir
+
+    def run(self):
+        import subprocess, shutil
+
+        script_dir  = os.path.dirname(os.path.abspath(self._script_path))
+        script_name = os.path.splitext(os.path.basename(self._script_path))[0]
+
+        # Build inside a temporary work directory so we don't pollute the source tree
+        build_dir = os.path.join(script_dir, "_exe_build_tmp")
+        dist_dir  = os.path.join(build_dir,  "dist")
+        work_dir  = os.path.join(build_dir,  "work")
+
+        cmd = [
+            sys.executable, "-m", "PyInstaller",
+            "--onefile",
+            "--name",    script_name,
+            "--distpath", dist_dir,
+            "--workpath", work_dir,
+            "--specpath", build_dir,
+            "--noconfirm",
+            self._script_path,
+        ]
+
+        try:
+            proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                cwd=script_dir,
+            )
+
+            self.progress_pct.emit(2)
+            current_pct = 2
+
+            for raw_line in proc.stdout:
+                line = raw_line.rstrip()
+                self.progress_line.emit(line)
+                lower = line.lower()
+                for keyword, pct in self._MILESTONES:
+                    if keyword in lower and pct > current_pct:
+                        current_pct = pct
+                        self.progress_pct.emit(current_pct)
+                        break
+
+            proc.wait()
+
+            if proc.returncode != 0:
+                self.finished.emit(False, "PyInstaller exited with errors. See log above.")
+                return
+
+            # Locate the produced executable
+            exe_name = script_name + (".exe" if sys.platform == "win32" else "")
+            src_exe  = os.path.join(dist_dir, exe_name)
+            if not os.path.isfile(src_exe):
+                self.finished.emit(False, f"Build succeeded but executable not found:\n{src_exe}")
+                return
+
+            # Copy to user-selected destination
+            dst_exe = os.path.join(self._dest_dir, exe_name)
+            shutil.copy2(src_exe, dst_exe)
+
+            # Also copy config.json next to the exe if it exists
+            cfg_src = os.path.join(script_dir, "config.json")
+            if os.path.isfile(cfg_src):
+                shutil.copy2(cfg_src, os.path.join(self._dest_dir, "config.json"))
+
+            self.progress_pct.emit(100)
+            self.finished.emit(True, dst_exe)
+
+        except Exception as exc:
+            self.finished.emit(False, str(exc))
+        finally:
+            # Clean up temporary build artefacts
+            try:
+                import shutil as _sh
+                if os.path.isdir(build_dir):
+                    _sh.rmtree(build_dir, ignore_errors=True)
+            except Exception:
+                pass
 
 
 def _collect_extra_lib_paths():
@@ -38,69 +171,145 @@ def _collect_extra_lib_paths():
 def _ensure_lib_paths():
     if os.environ.get("PYBEMCS_LD_PATCHED") == "1":
         return
+
     extras = _collect_extra_lib_paths()
     if not extras:
         return
+
     current = os.environ.get("LD_LIBRARY_PATH", "")
     current_parts = current.split(":") if current else []
-    # Prepend only the extras that aren't already first
-    missing = [p for p in extras if p not in current_parts[: len(extras)]]
+    missing = [p for p in extras if p not in current_parts[:len(extras)]]
     if not missing:
         return
+
     merged = ":".join(extras + [p for p in current_parts if p and p not in extras])
     os.environ["LD_LIBRARY_PATH"] = merged
     os.environ["PYBEMCS_LD_PATCHED"] = "1"
     # Re-exec so the dynamic linker picks up the prepended paths
     os.execv(sys.executable, [sys.executable] + sys.argv)
 
+
 _ensure_lib_paths()
 
-# Qt platform fall-back chain for Ubuntu 24.04+ / Wayland.
 if not os.environ.get("QT_QPA_PLATFORM"):
-    os.environ["QT_QPA_PLATFORM"] = "xcb;wayland;wayland-egl"
-
-import numpy as np
-import matplotlib
-matplotlib.use("Qt5Agg")
-import matplotlib.pyplot as plt
-from mpl_toolkits.axes_grid1 import make_axes_locatable
-from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
-from PyQt5.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-                             QLabel, QDoubleSpinBox, QPushButton, QCheckBox,
-                             QFrame, QMessageBox, QFileDialog, QApplication, QComboBox,
-                             QScrollArea, QGroupBox, QAction, QDialog, QFormLayout,
-                             QSpinBox, QMenu, QTableWidget, QTableWidgetItem,
-                             QHeaderView, QSplitter, QSizePolicy)
-from PyQt5.QtCore import QTimer, Qt
-from scipy.interpolate import UnivariateSpline
-import csv
-import time
-from physics_engine import DigitalTwinSimulator
+    if sys.platform == "win32":
+        os.environ["QT_QPA_PLATFORM"] = "windows"
+    else:
+        os.environ["QT_QPA_PLATFORM"] = "xcb;wayland;wayland-egl"
 
 
 def _safe_start_dir():
-    """Preferred starting directory for file dialogs. The user's home can
-    contain slow FUSE/snap mounts that freeze Qt's non-native file dialog
-    during stat/readdir; cwd (the project folder) is much faster."""
     try:
         return os.getcwd()
     except Exception:
         return os.path.expanduser("~")
 
-# --- BEAM SPECIES DIALOG ---
+
+def _config_path():
+    """
+    Returns the path to config.json located next to the .exe (or next to
+    main.py when running from source). Works on any PC, no hardcoding.
+    """
+    if getattr(sys, 'frozen', False):
+        # Running as a PyInstaller .exe — use the folder containing the .exe
+        base = os.path.dirname(sys.executable)
+    else:
+        # Running as normal Python — use the folder containing main.py
+        base = os.path.dirname(os.path.abspath(__file__))
+    return os.path.join(base, "config.json")
+
+def load_json_config(config_path=None):
+    if config_path is None:
+        config_path = _config_path()
+
+    if not os.path.isfile(config_path):
+        return None # no config present — caller will use defaults
+
+    with open(config_path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def load_cross_sections_from_config(config):
+    cs_store = {}
+    cs_cfg = config.get("cross_sections", {})
+    smoothing = cs_cfg.get("spline_smoothing", 0.0)
+
+    cs_files = {
+        "CX": cs_cfg.get("cx_file", "").strip(),
+        "SEE": cs_cfg.get("see_file", "").strip(),
+        "Custom": cs_cfg.get("custom_file", "").strip(),
+    }
+
+    for label, fpath in cs_files.items():
+        if not fpath:
+            continue
+        if not os.path.isfile(fpath):
+            print(f"Warning: cross-section file not found for {label}: {fpath}")
+            continue
+
+        try:
+            try:
+                raw = np.loadtxt(fpath, delimiter=None, comments="#")
+            except Exception:
+                raw = np.loadtxt(fpath, delimiter=",", comments="#", skiprows=1)
+
+            if raw.ndim != 2 or raw.shape[1] < 2:
+                print(f"Warning: {fpath} must have at least 2 columns. Skipping.")
+                continue
+
+            energy = raw[:, 0]
+            cs = raw[:, 1]
+            order  = np.argsort(energy)
+            energy = energy[order]
+            cs = cs[order]
+
+            log_e  = np.log10(np.maximum(energy, 1e-30))
+            log_cs = np.log10(np.maximum(cs, 1e-50))
+            spline = UnivariateSpline(log_e, log_cs, s=smoothing, k=3)
+
+            cs_store[label] = {
+                "energy": energy,
+                "cs": cs,
+                "spline": spline,
+                "type": label
+            }
+        except Exception as e:
+            print(f"Warning: failed to load {label} cross-section from {fpath}: {e}")
+
+    return cs_store
+
+class ScientificSpinBox(QDoubleSpinBox):
+    def textFromValue(self, value):
+        return f"{value:.3e}"
+
+    def valueFromText(self, text):
+        try:
+            return float(text)
+        except ValueError:
+            return 0.0
+
+    def validate(self, text, pos):
+        from PyQt5.QtGui import QValidator
+        try:
+            float(text.replace("E", "e"))
+            return (QValidator.Acceptable, text, pos)
+        except ValueError:
+            if text in ("", "-", "+", ".", "e", "E", "-e", "+e"):
+                return (QValidator.Intermediate, text, pos)
+            return (QValidator.Invalid, text, pos)
+        
 class BeamSpeciesDialog(QDialog):
-    # Common ion species presets: (name, mass_amu, default_charge)
     PRESETS = [
-        ('Custom', 0, 1),
-        ('Xenon (Xe)', 131.293, 1),
-        ('Krypton (Kr)', 83.798, 1),
-        ('Argon (Ar)', 39.948, 1),
-        ('Nitrogen (N₂)', 28.014, 1),
-        ('Oxygen (O₂)', 31.998, 1),
-        ('Hydrogen (H₂)', 2.016, 1),
-        ('Helium (He)', 4.0026, 1),
-        ('Mercury (Hg)', 200.59, 1),
-        ('Cesium (Cs)', 132.905, 1),
+        ("Custom", 0, 1),
+        ("Xenon (Xe)", 131.293, 1),
+        ("Krypton (Kr)", 83.798, 1),
+        ("Argon (Ar)", 39.948, 1),
+        ("Nitrogen (N₂)", 28.014, 1),
+        ("Oxygen (O₂)", 31.998, 1),
+        ("Hydrogen (H₂)", 2.016, 1),
+        ("Helium (He)", 4.0026, 1),
+        ("Mercury (Hg)", 200.59, 1),
+        ("Cesium (Cs)", 132.905, 1),
     ]
 
     def __init__(self, current_mass_amu, current_charge, parent=None):
@@ -109,7 +318,7 @@ class BeamSpeciesDialog(QDialog):
         self.setMinimumWidth(350)
         layout = QVBoxLayout(self)
 
-        layout.addWidget(QLabel("<b>Select a preset or enter custom values:</b>"))
+        layout.addWidget(QLabel("Select a preset or enter custom values:"))
 
         self.combo_preset = QComboBox()
         for name, _, _ in self.PRESETS:
@@ -124,14 +333,14 @@ class BeamSpeciesDialog(QDialog):
         self.spin_mass.setDecimals(3)
         self.spin_mass.setSingleStep(0.1)
         self.spin_mass.setValue(current_mass_amu)
-        self.spin_mass.setSuffix(' amu')
-        form.addRow('Atomic / Molecular Mass:', self.spin_mass)
+        self.spin_mass.setSuffix(" amu")
+        form.addRow("Atomic / Molecular Mass:", self.spin_mass)
 
         self.spin_charge = QSpinBox()
         self.spin_charge.setRange(1, 10)
         self.spin_charge.setValue(current_charge)
-        self.spin_charge.setPrefix('+')
-        form.addRow('Charge State:', self.spin_charge)
+        self.spin_charge.setPrefix("+")
+        form.addRow("Charge State:", self.spin_charge)
 
         layout.addLayout(form)
 
@@ -143,8 +352,6 @@ class BeamSpeciesDialog(QDialog):
         btn_box.addWidget(save_btn)
         btn_box.addWidget(cancel_btn)
         layout.addLayout(btn_box)
-
-        # Try to auto-select the matching preset
         self._sync_preset_from_values(current_mass_amu)
 
     def _sync_preset_from_values(self, mass_amu):
@@ -155,7 +362,7 @@ class BeamSpeciesDialog(QDialog):
                 self.combo_preset.blockSignals(False)
                 return
         self.combo_preset.blockSignals(True)
-        self.combo_preset.setCurrentIndex(0)  # Custom
+        self.combo_preset.setCurrentIndex(0)
         self.combo_preset.blockSignals(False)
 
     def _on_preset(self, idx):
@@ -167,34 +374,41 @@ class BeamSpeciesDialog(QDialog):
     def get_values(self):
         return self.spin_mass.value(), self.spin_charge.value()
 
-
-# --- GRID MATERIAL DIALOG ---
+# Grid material properties dialog with presets and custom input fields
 class GridMaterialDialog(QDialog):
     PRESETS = {
-        'Molybdenum':   {'k': 138.0, 'rho': 10280.0, 'cp': 250.0,
-                         'emissivity': 0.80, 'alpha': 4.8e-6, 'E_mod': 329e9,
-                         'Y_coeff': 1.05e-4, 'E_th': 30.0},
-        'Steel (SS316)':{'k': 16.3,  'rho': 8000.0,  'cp': 500.0,
-                         'emissivity': 0.60, 'alpha': 16.0e-6, 'E_mod': 193e9,
-                         'Y_coeff': 2.8e-4,  'E_th': 25.0},
-        'Titanium':     {'k': 21.9,  'rho': 4507.0,  'cp': 520.0,
-                         'emissivity': 0.50, 'alpha': 8.6e-6, 'E_mod': 116e9,
-                         'Y_coeff': 1.8e-4,  'E_th': 20.0},
-        'Graphite':     {'k': 120.0, 'rho': 2200.0,  'cp': 710.0,
-                         'emissivity': 0.85, 'alpha': 3.0e-6, 'E_mod': 11e9,
-                         'Y_coeff': 3.5e-4,  'E_th': 15.0},
-        'Custom':       None,
+        "Molybdenum": {
+            "k": 138.0, "rho": 10280.0, "cp": 250.0,
+            "emissivity": 0.80, "alpha": 4.8e-6, "E_mod": 329e9,
+            "Y_coeff": 1.05e-4, "E_th": 30.0
+        },
+        "Steel (SS316)": {
+            "k": 16.3, "rho": 8000.0, "cp": 500.0,
+            "emissivity": 0.60, "alpha": 16.0e-6, "E_mod": 193e9,
+            "Y_coeff": 2.8e-4, "E_th": 25.0
+        },
+        "Titanium": {
+            "k": 21.9, "rho": 4507.0, "cp": 520.0,
+            "emissivity": 0.50, "alpha": 8.6e-6, "E_mod": 116e9,
+            "Y_coeff": 1.8e-4, "E_th": 20.0
+        },
+        "Graphite": {
+            "k": 120.0, "rho": 2200.0, "cp": 710.0,
+            "emissivity": 0.85, "alpha": 3.0e-6, "E_mod": 11e9,
+            "Y_coeff": 3.5e-4, "E_th": 15.0
+        },
+        "Custom": None,
     }
 
     FIELD_DEFS = [
-        ('k',          'Thermal Conductivity (W/m/K):',  0.1, 5000, 138.0,  1),
-        ('rho',        'Density (kg/m³):',               100, 25000, 10280.0, 0),
-        ('cp',         'Specific Heat (J/kg/K):',        50, 5000, 250.0,   0),
-        ('emissivity', 'Emissivity (0-1):',              0.01, 1.0, 0.8,    2),
-        ('alpha',      'Thermal Expansion (1/K):',       0, 1e-3, 4.8e-6,  7),
-        ('E_mod',      "Young's Modulus (Pa):",           1e8, 1e12, 329e9,  0),
-        ('Y_coeff',    'Sputter Yield Coeff:',           0, 1e-2, 1.05e-4, 6),
-        ('E_th',       'Sputter Threshold (eV):',        0, 500,  30.0,    1),
+        ("k", "Thermal Conductivity (W/m/K):", 0.1, 5000, 138.0, 1),
+        ("rho", "Density (kg/m³):", 100, 25000, 10280.0, 0),
+        ("cp", "Specific Heat (J/kg/K):", 50, 5000, 250.0, 0),
+        ("emissivity", "Emissivity (0-1):", 0.01, 1.0, 0.8, 2),
+        ("alpha", "Thermal Expansion (1/K):", 0, 1e-3, 4.8e-6, 7),
+        ("E_mod", "Young's Modulus (Pa):", 1e8, 1e12, 329e9, 0),
+        ("Y_coeff", "Sputter Yield Coeff:", 0, 1e-2, 1.05e-4, 6),
+        ("E_th", "Sputter Threshold (eV):", 0, 500, 30.0, 1),
     ]
 
     def __init__(self, current_mat_name, current_props, parent=None):
@@ -203,7 +417,7 @@ class GridMaterialDialog(QDialog):
         self.setMinimumWidth(380)
         layout = QVBoxLayout(self)
 
-        layout.addWidget(QLabel("<b>Select a preset or enter custom values:</b>"))
+        layout.addWidget(QLabel("Select a preset or enter custom values:"))
 
         self.combo = QComboBox()
         self.combo.addItems(list(self.PRESETS.keys()))
@@ -235,7 +449,7 @@ class GridMaterialDialog(QDialog):
         if current_mat_name in self.PRESETS:
             self.combo.setCurrentText(current_mat_name)
         else:
-            self.combo.setCurrentText('Custom')
+            self.combo.setCurrentText("Custom")
 
     def _on_preset(self, name):
         props = self.PRESETS.get(name)
@@ -249,50 +463,42 @@ class GridMaterialDialog(QDialog):
         return name, props
 
 
-# --- CROSS-SECTION VIEWER / MANAGER WINDOW ---
 class CrossSectionViewerWindow(QWidget):
-    """
-    Allows the user to import CSV cross-section tables (Energy [eV] vs σ [m²]),
-    visualize them, and fit a cubic spline for runtime interpolation.
-    Supports multiple reaction channels: CX, SEE yield, and custom.
-    """
-    REACTION_TYPES = ['Charge Exchange (CX)', 'Secondary Electron Yield (SEE)', 'Custom Reaction']
+    REACTION_TYPES = ["Charge Exchange (CX)", "Secondary Electron Yield (SEE)", "Custom Reaction"]
 
     def __init__(self, cs_store, parent=None):
-        super().__init__()  # No parent — opens as independent top-level window
+        super().__init__()
         self.cs_store = cs_store
-        self.setWindowTitle('Cross-Section Data Manager')
+        self.setWindowTitle("Cross-Section Data Manager")
         self.setMinimumSize(950, 600)
         self.resize(950, 600)
 
-        # Use a QSplitter so user can resize the control panel vs plot
-        splitter = QSplitter(Qt.Horizontal, self)
+        splitter = QSplitter(Qt.Orientation.Horizontal, self)
 
-        # --- Left: controls panel ---
+        # Left control channel
         left_widget = QWidget()
         left = QVBoxLayout(left_widget)
         left.setContentsMargins(8, 8, 8, 8)
 
-        left.addWidget(QLabel('<b>Reaction Type:</b>'))
+        left.addWidget(QLabel("Reaction Type:"))
         self.combo_type = QComboBox()
         self.combo_type.addItems(self.REACTION_TYPES)
         left.addWidget(self.combo_type)
 
-        self.btn_import = QPushButton('Import CSV...')
-        self.btn_import.setStyleSheet("background-color: #AED6F1; font-weight: bold;")
+        self.btn_import = QPushButton("Import CSV...")
         self.btn_import.clicked.connect(self._import_csv)
         left.addWidget(self.btn_import)
 
-        left.addWidget(QLabel('<b>Loaded Datasets:</b>'))
+        left.addWidget(QLabel("Loaded Datasets:"))
         self.combo_datasets = QComboBox()
         self.combo_datasets.currentIndexChanged.connect(self._on_dataset_selected)
         left.addWidget(self.combo_datasets)
 
-        self.btn_remove = QPushButton('Remove Selected')
+        self.btn_remove = QPushButton("Remove Selected")
         self.btn_remove.clicked.connect(self._remove_dataset)
         left.addWidget(self.btn_remove)
 
-        left.addWidget(QLabel('<b>Spline Smoothing:</b>'))
+        left.addWidget(QLabel("Spline Smoothing:"))
         self.spin_smooth = QDoubleSpinBox()
         self.spin_smooth.setRange(0.0, 1e6)
         self.spin_smooth.setValue(0.0)
@@ -300,20 +506,21 @@ class CrossSectionViewerWindow(QWidget):
         self.spin_smooth.setToolTip('0 = interpolating spline (passes through all points)')
         left.addWidget(self.spin_smooth)
 
-        self.btn_fit = QPushButton('Fit Spline')
-        self.btn_fit.setStyleSheet("background-color: #ABEBC6; font-weight: bold;")
+        self.btn_fit = QPushButton("Fit Spline")
         self.btn_fit.clicked.connect(self._fit_spline)
         left.addWidget(self.btn_fit)
 
-        self.lbl_info = QLabel('No data loaded.')
+        self.lbl_info = QLabel("No data loaded.")
         self.lbl_info.setWordWrap(True)
         left.addWidget(self.lbl_info)
 
-        # Data preview table
-        left.addWidget(QLabel('<b>Data Preview:</b>'))
+        left.addWidget(QLabel("Data Preview:"))
         self.table = QTableWidget(0, 2)
-        self.table.setHorizontalHeaderLabels(['Energy (eV)', 'Cross-Section (m²)'])
-        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.table.setHorizontalHeaderLabels(["Energy (eV)", "Cross-Section (m²)"])
+        header = self.table.horizontalHeader()
+        if header is not None:
+            # Some PyQt/PySide stubs/type-checkers mark this as Optional; guard at runtime
+            header.setSectionResizeMode(QHeaderView.Stretch)
         left.addWidget(self.table)
 
         left_widget.setMinimumWidth(280)
@@ -344,29 +551,31 @@ class CrossSectionViewerWindow(QWidget):
         if self.combo_datasets.count() > 0:
             self.combo_datasets.setCurrentIndex(self.combo_datasets.count() - 1)
             self._on_dataset_selected(self.combo_datasets.currentIndex())
+        else:
+            self._plot_current()
+            self._update_table()
 
     def _import_csv(self):
         fname, _ = QFileDialog.getOpenFileName(
-            self, 'Import Cross-Section CSV', '',
-            'CSV Files (*.csv);;Text Files (*.txt *.dat);;All Files (*)')
+            self, "Import Cross-Section CSV", "",
+            "CSV Files (*.csv);;Text Files (*.txt *.dat);;All Files (*)"
+        )
         if not fname:
             return
 
         try:
-            raw = np.loadtxt(fname, delimiter=None, comments='#', skiprows=0)
+            raw = np.loadtxt(fname, delimiter=None, comments="#", skiprows=0)
             if raw.ndim == 1:
                 raise ValueError("File must have at least two columns.")
-            # Try comma-delimited if auto didn't work
         except Exception:
             try:
-                raw = np.loadtxt(fname, delimiter=',', comments='#', skiprows=1)
+                raw = np.loadtxt(fname, delimiter=",", comments="#", skiprows=1)
             except Exception as e2:
-                QMessageBox.critical(self, 'Import Error', f'Could not parse CSV:\n{e2}')
+                QMessageBox.critical(self, "Import Error", f"Could not parse CSV:\n{e2}")
                 return
 
         if raw.ndim != 2 or raw.shape[1] < 2:
-            QMessageBox.critical(self, 'Import Error',
-                                 'File must have at least 2 columns (Energy, Cross-Section).')
+            QMessageBox.critical(self, "Import Error", "File must have at least 2 columns.")
             return
 
         energy = raw[:, 0]
@@ -378,30 +587,28 @@ class CrossSectionViewerWindow(QWidget):
         cs = cs[order]
 
         rtype = self.combo_type.currentText()
-        # Build a unique label
-        base = rtype.split('(')[-1].replace(')', '').strip()
+        base = rtype.split("(")[-1].replace(")", "").strip()
         count = sum(1 for k in self.cs_store if k.startswith(base))
-        label = f"{base}_{count+1}" if count > 0 else base
+        label = f"{base}_{count + 1}" if count > 0 else base
 
         self.cs_store[label] = {
-            'energy': energy,
-            'cs': cs,
-            'spline': None,
-            'type': rtype
+            "energy": energy,
+            "cs": cs,
+            "spline": None,
+            "type": rtype
         }
 
         self._refresh_combo()
         self._plot_current()
-        self.lbl_info.setText(f'Loaded "{label}": {len(energy)} points, '
-                              f'E range [{energy[0]:.1f}, {energy[-1]:.1f}] eV')
+        self.lbl_info.setText(
+            f'Loaded "{label}": {len(energy)} points, E range [{energy[0]:.1f}, {energy[-1]:.1f}] eV'
+        )
 
     def _remove_dataset(self):
         label = self.combo_datasets.currentText()
         if label and label in self.cs_store:
             del self.cs_store[label]
-            self._refresh_combo()
-            self._plot_current()
-            self.lbl_info.setText(f'Removed "{label}".')
+        self._refresh_combo()
 
     def _on_dataset_selected(self, idx):
         self._plot_current()
@@ -412,8 +619,9 @@ class CrossSectionViewerWindow(QWidget):
         if not label or label not in self.cs_store:
             self.table.setRowCount(0)
             return
+
         ds = self.cs_store[label]
-        n = min(len(ds['energy']), 50)  # Show first 50 rows
+        n = min(len(ds["energy"]), 50)
         self.table.setRowCount(n)
         for i in range(n):
             self.table.setItem(i, 0, QTableWidgetItem(f"{ds['energy'][i]:.4e}"))
@@ -422,16 +630,15 @@ class CrossSectionViewerWindow(QWidget):
     def _fit_spline(self):
         label = self.combo_datasets.currentText()
         if not label or label not in self.cs_store:
-            QMessageBox.warning(self, 'No Data', 'Select a dataset first.')
+            QMessageBox.warning(self, "No Data", "Select a dataset first.")
             return
 
         ds = self.cs_store[label]
-        energy = ds['energy']
-        cs = ds['cs']
+        energy = ds["energy"]
+        cs = ds["cs"]
 
         if len(energy) < 4:
-            QMessageBox.warning(self, 'Too Few Points',
-                                'Need at least 4 data points for spline fitting.')
+            QMessageBox.warning(self, "Too Few Points", "Need at least 4 data points for spline fitting.")
             return
 
         try:
@@ -440,12 +647,11 @@ class CrossSectionViewerWindow(QWidget):
             log_e = np.log10(np.maximum(energy, 1e-30))
             log_cs = np.log10(np.maximum(cs, 1e-50))
             spline = UnivariateSpline(log_e, log_cs, s=s_val, k=3)
-            ds['spline'] = spline
-            self.lbl_info.setText(f'Spline fitted for "{label}" (smoothing={s_val}).\n'
-                                  f'This data will be used in the simulation.')
+            ds["spline"] = spline
+            self.lbl_info.setText(f'Spline fitted for "{label}" (smoothing={s_val}).')
             self._plot_current()
         except Exception as e:
-            QMessageBox.critical(self, 'Spline Error', f'Failed to fit spline:\n{e}')
+            QMessageBox.critical(self, "Spline Error", f"Failed to fit spline:\n{e}")
 
     def _plot_current(self):
         self.ax.clear()
@@ -453,29 +659,25 @@ class CrossSectionViewerWindow(QWidget):
 
         if label and label in self.cs_store:
             ds = self.cs_store[label]
-            energy = ds['energy']
-            cs = ds['cs']
+            energy = ds["energy"]
+            cs = ds["cs"]
 
-            self.ax.loglog(energy, cs, 'o', ms=4, label='Data', color='#2980B9')
+            self.ax.loglog(energy, cs, "o", ms=4, label="Data", color="#2980B9")
 
-            if ds['spline'] is not None:
-                e_fine = np.logspace(np.log10(max(energy[0], 1e-30)),
-                                     np.log10(energy[-1]), 500)
-                log_cs_fine = ds['spline'](np.log10(e_fine))
+            if ds["spline"] is not None:
+                e_fine = np.logspace(np.log10(max(energy[0], 1e-30)), np.log10(energy[-1]), 500)
+                log_cs_fine = ds["spline"](np.log10(e_fine))
                 cs_fine = 10.0 ** log_cs_fine
-                self.ax.loglog(e_fine, cs_fine, '-', lw=2, label='Spline Fit',
-                               color='#E74C3C')
+                self.ax.loglog(e_fine, cs_fine, "-", lw=2, label="Spline Fit", color="#E74C3C")
 
-            self.ax.set_xlabel('Energy (eV)')
-            self.ax.set_ylabel('Cross-Section (m²)')
-            self.ax.set_title(f'{label} — {ds.get("type", "")}')
+            self.ax.set_title(f"{label} — {ds.get('type', '')}")
             self.ax.legend()
-            self.ax.grid(True, which='both', alpha=0.3)
+            self.ax.grid(True, which="both", alpha=0.3)
         else:
-            self.ax.set_title('No data loaded')
-            self.ax.set_xlabel('Energy (eV)')
-            self.ax.set_ylabel('Cross-Section (m²)')
+            self.ax.set_title("No data loaded")
 
+        self.ax.set_xlabel("Energy (eV)")
+        self.ax.set_ylabel("Cross-Section (m²)")
         self.fig.tight_layout()
         self.canvas.draw_idle()
 
@@ -486,11 +688,12 @@ class AdvancedSettingsDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("Advanced Simulation Parameters")
         self.setMinimumWidth(350)
-        self.layout = QVBoxLayout(self)
-        
+        layout = QVBoxLayout(self)
+        self.setLayout(layout)
+
         self.form = QFormLayout()
         self.inputs = {}
-        
+
         def add_spin(key, label, min_v, max_v, default_v, decimals=1, step=1.0):
             spin = QDoubleSpinBox()
             spin.setRange(min_v, max_v)
@@ -500,15 +703,15 @@ class AdvancedSettingsDialog(QDialog):
             self.form.addRow(label, spin)
             self.inputs[key] = spin
 
-        add_spin('neut_x', 'Neutralizer Axial Dist (x, mm):', 0, 100, current_params.get('neut_x', 19.9))
-        add_spin('neut_r', 'Neutralizer Radius (y, mm):', 0.1, 50, current_params.get('neut_r', 3.0))
-        add_spin('V_plasma_offset', 'Plasma Potential Offset (V):', 0, 500, current_params.get('V_plasma_offset', 20.0))
-        add_spin('m_e_ratio', 'Electron Mass Ratio (m_Xe / X):', 1, 100000, current_params.get('m_e_ratio', 1000.0), 0, 100)
-        add_spin('Lx', 'Domain Length (Lx, mm):', 5, 200, current_params.get('Lx', 20.0))
-        add_spin('Ly', 'Domain Height (Ly, mm):', 1, 50, current_params.get('Ly', 3.0))
-        
-        self.layout.addLayout(self.form)
-        
+        add_spin("neut_x", "Neutralizer Axial Dist (x, mm):", 0, 100, current_params["neut_x"])
+        add_spin("neut_r", "Neutralizer Radius (y, mm):", 0.1, 50, current_params["neut_r"])
+        add_spin("V_plasma_offset", "Plasma Potential Offset (V):", 0, 500, current_params["V_plasma_offset"])
+        add_spin("m_e_ratio", "Electron Mass Ratio (m_Xe / X):", 1, 100000, current_params["m_e_ratio"], 0, 100)
+        add_spin("Lx", "Domain Length (Lx, mm):", 5, 200, current_params["Lx"])
+        add_spin("Ly", "Domain Height (Ly, mm):", 1, 50, current_params["Ly"])
+
+        layout.addLayout(self.form)
+
         btn_box = QHBoxLayout()
         save_btn = QPushButton("Save & Apply")
         save_btn.clicked.connect(self.accept)
@@ -517,98 +720,99 @@ class AdvancedSettingsDialog(QDialog):
         
         btn_box.addWidget(save_btn)
         btn_box.addWidget(cancel_btn)
-        self.layout.addLayout(btn_box)
+        layout.addLayout(btn_box)
 
     def get_values(self):
         return {k: v.value() for k, v in self.inputs.items()}
 
-# --- IEDF & EEDF SUB-WINDOW CLASS ---
+
 class IEDFWindow(QWidget):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle('Energy Distribution Function (IEDF & EEDF)')
+        self.setWindowTitle("Energy Distribution Function (IEDF & EEDF)")
         self.setGeometry(100, 100, 600, 450)
-        
+
         layout = QVBoxLayout(self)
-        
+
         self.combo_type = QComboBox()
         self.combo_type.addItems([
-            'All Ions', 'Primary Ions Only', 'CEX Ions Only',
-            'All Electrons', 'Grid Secondary Electrons (SEE) [x <= 4mm]',
-            'Neutralizer Electrons (Neut) [x > 4mm]'
+            "All Ions", "Primary Ions Only", "CEX Ions Only",
+            "All Electrons", "Grid Secondary Electrons (SEE) [x <= 4mm]",
+            "Neutralizer Electrons (Neut) [x > 4mm]"
         ])
-        layout.addWidget(QLabel("<b>Select Particle Population:</b>"))
+        layout.addWidget(QLabel("Select Particle Population:"))
         layout.addWidget(self.combo_type)
-        
+
         self.fig = plt.figure(figsize=(6, 4))
         self.canvas = FigureCanvas(self.fig)
         self.ax = self.fig.add_subplot(111)
         layout.addWidget(self.canvas)
-        
+
     def update_histogram(self, p_vx, p_vy, p_isCEX, e_x, e_vx, e_vy, m_XE, m_e, q, Vs_max):
         self.ax.clear()
         self.ax.grid(True, alpha=0.3)
-        
+
         mode = self.combo_type.currentText()
         data = np.array([])
-        color = 'gray'
-        x_max = Vs_max + 100 
-        title = 'Energy Distribution'
+        color = "gray"
+        x_max = Vs_max + 100
+        title = "Energy Distribution"
 
-        if 'Ions' in mode:
-            self.ax.set_xlabel('Energy (eV)')
-            self.ax.set_ylabel('Ion Count')
+        if "Ions" in mode:
+            self.ax.set_xlabel("Energy (eV)")
+            self.ax.set_ylabel("Ion Count")
             if len(p_vx) > 0:
                 v_sq = p_vx**2 + p_vy**2
                 E_all = (0.5 * m_XE * v_sq) / q
-                
-                if mode == 'All Ions':
-                    data, color, title = E_all, 'purple', 'Ion Energy Distribution (All Ions)'
-                elif mode == 'Primary Ions Only':
-                    data, color, title = E_all[~p_isCEX], 'blue', 'Ion Energy Distribution (Primary Beam)'
+
+                if mode == "All Ions":
+                    data, color, title = E_all, "purple", "Ion Energy Distribution (All Ions)"
+                elif mode == "Primary Ions Only":
+                    data, color, title = E_all[~p_isCEX], "blue", "Ion Energy Distribution (Primary Beam)"
                 else:
-                    data, color, title = E_all[p_isCEX], 'red', 'Ion Energy Distribution (CEX Only)'
-                    x_max = max(Vs_max * 0.3, np.max(data) + 50) if len(data) > 0 else 500 
+                    data, color, title = E_all[p_isCEX], "red", "Ion Energy Distribution (CEX Only)"
+
+                x_max = max(Vs_max * 0.3, np.max(data) + 50) if len(data) > 0 else 500
 
         else:
-            self.ax.set_xlabel('Electron Kinetic Energy (eV)')
-            self.ax.set_ylabel('Electron Count')
+            self.ax.set_xlabel("Electron Kinetic Energy (eV)")
+            self.ax.set_ylabel("Electron Count")
             if len(e_vx) > 0:
                 v_sq_e = e_vx**2 + e_vy**2
                 E_elec = (0.5 * m_e * v_sq_e) / q
-                
-                if mode == 'All Electrons':
-                    data, color, title = E_elec, '#2ECC71', 'Electron Energy Distribution (All)'
-                elif 'SEE' in mode:
-                    data, color, title = E_elec[e_x <= 4.0], '#E67E22', 'Electron Energy Distribution (Grid/SEE Zone)'
+
+                if mode == "All Electrons":
+                    data, color, title = E_elec, "#2ECC71", "Electron Energy Distribution (All)"
+                elif "SEE" in mode:
+                    data, color, title = E_elec[e_x <= 4.0], "#E67E22", "Electron Energy Distribution (Grid/SEE Zone)"
                 else:
-                    data, color, title = E_elec[e_x > 4.0], '#1ABC9C', 'Electron Energy Distribution (Plume/Neut Zone)'
-                
-                if len(data) > 0:
-                    hist_max = np.percentile(data, 99) 
-                    x_max = max(20.0, hist_max * 1.2) 
-                else:
-                    x_max = 20.0
+                    data, color, title = E_elec[e_x > 4.0], "#1ABC9C", "Electron Energy Distribution (Plume/Neut Zone)"
+
+                x_max = max(20.0, np.percentile(data, 99) * 1.2) if len(data) > 0 else 20.0
 
         self.ax.set_title(title)
         if len(data) > 0:
-            self.ax.hist(data, bins=50, range=(0, x_max), color=color, alpha=0.8, edgecolor='black')
-            self.ax.set_xlim(0, x_max)
+            self.ax.hist(data, bins=50, range=(0, x_max), color=color, alpha=0.8, edgecolor="black")
+        self.ax.set_xlim(0, x_max)
         self.canvas.draw_idle()
 
 
 class DigitalTwinApp(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle('PY-BEMCS (Multi-Grid & Co-Extraction)')
-        self.setGeometry(20, 30, 1500, 800) 
+        self.setWindowTitle("PY-BEMCS (Multi-Grid & Co-Extraction)")
+        self.setGeometry(20, 30, 1500, 800)
 
+        self.config = load_json_config()
         self.sim = DigitalTwinSimulator()
         self.sim_isRunning = False
 
         self.iter_history = []
-        self.ebs_history = []
-        self.div_history = []
+        self.ebs_history  = []
+        self.div_history  = []
+        self.time_history = []   # simulated time [s]
+        self.transparency_history  = []
+        self.transparency3_history = []
         self.T_histories = {}
         self.recorded_frames = []
         self.tracking_buffer = []
@@ -620,68 +824,504 @@ class DigitalTwinApp(QMainWindow):
 
         self.grid_widgets = []
 
-        # Beam species configuration
-        self.beam_mass_amu = 131.293  # Xenon default
-        self.beam_charge_state = 1
+        self.beam_mass_amu     = None
+        self.beam_charge_state = None
+        self.cs_store   = {}
+        self.mat_name   = None
+        self.mat_props  = {}
+        self.adv_params = {}
 
-        # Cross-section data store: {label: {energy, cs, spline, type}}
-        self.cs_store = {}
+        self.inputs = {}
 
-        # Grid material configuration
-        self.mat_name = 'Molybdenum'
-        self.mat_props = GridMaterialDialog.PRESETS['Molybdenum'].copy()
-        
-        # Advanced settings defaults
-        self.adv_params = {
-            'neut_x': 19.9,
-            'neut_r': 3.0,
-            'V_plasma_offset': 20.0,
-            'm_e_ratio': 1000.0,
-            'Lx': 20.0,
-            'Ly': 3.0
-        }
-        
         self.setup_menu_bar()
         self.setup_ui()
+        if self.config is not None:
+            self.apply_config(self.config)
+        else:
+            # No config.json found — load hardcoded defaults directly into the UI
+            self._apply_defaults()
+
         self.timer = QTimer()
         self.timer.timeout.connect(self.run_sim_step)
         self.timer.start(33)
+        self.lbl_status = QLabel("Status: Ready.")
 
     def setup_menu_bar(self):
         menubar = self.menuBar()
+        # On some platforms/menu styles menuBar() may return None; create one if needed
+        if menubar is None:
+            menubar = QMenuBar(self)
+            self.setMenuBar(menubar)
+        # make type checkers aware menubar is not None
+        assert menubar is not None
 
-        # --- Settings Menu ---
-        settings_menu = menubar.addMenu('Settings')
-        adv_action = QAction('Advanced Parameters...', self)
+        settings_menu = menubar.addMenu("Settings")  # type: ignore[attr-defined]
+        adv_action = QAction("Advanced Parameters...", self)
         adv_action.triggered.connect(self.open_advanced_settings)
         settings_menu.addAction(adv_action)
 
-        # --- Beam Menu ---
-        beam_menu = menubar.addMenu('Beam')
+        reload_action = QAction("Reload config.json", self)
+        reload_action.triggered.connect(self.reload_config)
+        settings_menu.addAction(reload_action)
 
-        species_action = QAction('Ion Species...', self)
+        beam_menu = menubar.addMenu("Beam")
+        assert beam_menu is not None # make type checkers aware beam menu is not None
+        species_action = QAction("Ion Species...", self)
         species_action.triggered.connect(self.open_beam_species)
         beam_menu.addAction(species_action)
 
         beam_menu.addSeparator()
 
-        cs_action = QAction('Cross-Section Manager...', self)
+        cs_action = QAction("Cross-Section Manager...", self)
         cs_action.triggered.connect(self.open_cs_viewer)
         beam_menu.addAction(cs_action)
 
-        # --- Materials Menu ---
-        mat_menu = menubar.addMenu('Materials')
-
-        mat_action = QAction('Grid Material...', self)
+        mat_menu = menubar.addMenu("Materials")
+        mat_action = QAction("Grid Material...", self)
         mat_action.triggered.connect(self.open_grid_material)
         mat_menu.addAction(mat_action)
+        open_action = QAction("Open Config JSON...", self)
+        open_action.triggered.connect(self.open_config_json)
+        settings_menu.addAction(open_action)
 
+        settings_menu.addSeparator()
+        build_exe_action = QAction("Build .exe...", self)
+        build_exe_action.triggered.connect(self.build_exe)
+        settings_menu.addAction(build_exe_action)
+
+    def open_config_json(self):
+        file_name, _ = QFileDialog.getOpenFileName(
+            self,
+            "Open Config JSON",
+            _safe_start_dir(),
+            "JSON Files (*.json)"
+        )
+        if not file_name:
+            return
+
+        try:
+            cfg = load_json_config(file_name)
+            self.apply_config(cfg)
+            self.lbl_status.setText(f"Loaded config: {file_name}")
+        except Exception as e:
+            QMessageBox.critical(self, "Config Error", f"Failed to load config:\n{e}")
+
+    def create_input(self, labeltext, minv, maxv, step, decimals=1, scientific=False):
+        row = QHBoxLayout()
+        lbl = QLabel(labeltext)
+        lbl.setFixedWidth(130)
+        spin = ScientificSpinBox() if scientific else QDoubleSpinBox()
+        spin.setRange(minv, maxv)
+        spin.setSingleStep(step)
+        spin.setDecimals(decimals)
+        row.addWidget(lbl)
+        row.addWidget(spin)
+        return row, spin
+
+    def add_grid_ui(self, v_val, t_val, gap_val, r_val, cham_val):
+        idx = len(self.grid_widgets) + 1
+        gb = QGroupBox(f"Grid {idx}")
+        lay = QVBoxLayout()
+
+        row1, spin_v = self.create_input("DC Voltage (V):", -5000, 15000, 100, 3)
+        row2, spin_t = self.create_input("Thickness (mm):", 0.0, 10.0, 0.01, 4)
+        row3, spin_gap = self.create_input("Gap to Next (mm):", 0.0, 10.0, 0.01, 4)
+        row4, spin_r = self.create_input("Hole Radius (mm):", 0.0, 10.0, 0.01, 4)
+        row5, spin_cham = self.create_input("Chamfer (°):", 0.0, 45.0, 0.1, 3)
+
+        spin_v.setValue(v_val)
+        spin_t.setValue(t_val)
+        spin_gap.setValue(gap_val)
+        spin_r.setValue(r_val)
+        spin_cham.setValue(cham_val)
+
+        lay.addLayout(row1)
+        lay.addLayout(row2)
+        lay.addLayout(row3)
+        lay.addLayout(row4)
+        lay.addLayout(row5)
+        gb.setLayout(lay)
+
+        self.grids_layout.insertWidget(self.grids_layout.count() - 1, gb)
+
+        self.grid_widgets.append({
+            "gb": gb, "V": spin_v, "t": spin_t, "gap": spin_gap,
+            "r": spin_r, "cham": spin_cham
+        })
+        self.update_rf_combo()
+
+    def clear_grid_ui(self):
+        while self.grid_widgets:
+            gw = self.grid_widgets.pop()
+            gw["gb"].deleteLater()
+        self.update_rf_combo()
+
+    def remove_grid_ui(self):
+        if len(self.grid_widgets) > 1:
+            gw = self.grid_widgets.pop()
+            gw["gb"].deleteLater()
+            self.update_rf_combo()
+
+    def update_rf_combo(self):
+        if hasattr(self, "combo_rf_grid"):
+            current = self.combo_rf_grid.currentIndex()
+            self.combo_rf_grid.clear()
+            self.combo_rf_grid.addItems([f"Grid {i + 1}" for i in range(len(self.grid_widgets))])
+            if self.combo_rf_grid.count() > 0:
+                self.combo_rf_grid.setCurrentIndex(max(0, min(current, self.combo_rf_grid.count() - 1)))
+
+    def setup_ui(self):
+        main_widget = QWidget()
+        self.setCentralWidget(main_widget)
+        main_layout = QHBoxLayout(main_widget)
+        main_layout.setSpacing(0)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+
+        # SCROLLABLE CONTROL PANEL
+        scroll_area = QScrollArea()
+        scroll_area.setFixedWidth(330)
+        scroll_area.setWidgetResizable(True)
+
+        control_panel  = QWidget()
+        control_layout = QVBoxLayout(control_panel)
+
+        self.combo_rf_grid = QComboBox()
+
+        control_layout.addWidget(QLabel("1. MULTI-GRID OPTICS"))
+        self.grids_layout = QVBoxLayout()
+
+        btn_layout = QHBoxLayout()
+        btn_add = QPushButton("+ Add Grid")
+        btn_rem = QPushButton("- Remove Grid")
+        btn_add.clicked.connect(lambda: self.add_grid_ui(0.0, 0.0, 0.0, 0.0, 0.0))
+        btn_rem.clicked.connect(self.remove_grid_ui)
+        btn_layout.addWidget(btn_add)
+        btn_layout.addWidget(btn_rem)
+
+        self.grids_layout.addLayout(btn_layout)
+        control_layout.addLayout(self.grids_layout)
+
+        control_layout.addSpacing(15)
+
+        control_layout.addWidget(QLabel("2. RF CO-EXTRACTION"))
+        self.chk_rf = QCheckBox("Enable RF Modulated Potential")
+        control_layout.addWidget(self.chk_rf)
+
+        rf_row = QHBoxLayout()
+        rf_row.addWidget(QLabel("Apply RF to:"))
+        rf_row.addWidget(self.combo_rf_grid)
+        control_layout.addLayout(rf_row)
+
+        row_freq, self.spin_rf_freq = self.create_input("Frequency (MHz):", 0.0, 100.0, 0.1, 4)
+        row_amp, self.spin_rf_amp   = self.create_input("Amplitude (V):", 0.0, 5000.0, 1.0, 4)
+        control_layout.addLayout(row_freq)
+        control_layout.addLayout(row_amp)
+
+        control_layout.addSpacing(15)
+
+        control_layout.addWidget(QLabel("3. PLASMA & SPUTTERING"))
+        row, self.inputs["n0_plasma"] = self.create_input("Plasma Dens (m-3):", 0.0, 1e25, 1e16, 4, scientific=True)
+        control_layout.addLayout(row)
+        row, self.inputs["Te_up"] = self.create_input("Upstream Te (eV):", 0.0, 1000.0, 0.1, 4)
+        control_layout.addLayout(row)
+        row, self.inputs["Ti"] = self.create_input("Ion Temp (eV):", 0.0, 1000.0, 0.1, 4)
+        control_layout.addLayout(row)
+        row, self.inputs["Tn"] = self.create_input("Neutral Temp (K):", 0.0, 10000.0, 1.0, 4)
+        control_layout.addLayout(row)
+        row, self.inputs["n0"] = self.create_input("Neutral Dens (m-3):", 0.0, 1e25, 1e18, 4, scientific=True)
+        control_layout.addLayout(row)
+        row, self.inputs["Accel"] = self.create_input("Accel. Factor (X):", 0.0, 1e20, 0.1, 6)
+        control_layout.addLayout(row)
+        row, self.inputs["Thresh"] = self.create_input("Cell Fail Thresh:", 0.0, 1e12, 1.0, 4)
+        control_layout.addLayout(row)
+
+        control_layout.addSpacing(15)
+        control_layout.addWidget(QLabel("4. SIMULATION MODE"))
+        self.combo_mode = QComboBox()
+        self.combo_mode.addItems(["Both", "Thermal", "Erosion", "Trajectories"])
+        control_layout.addWidget(self.combo_mode)
+
+        # Geometry mode selector
+        control_layout.addWidget(QLabel("Geometry Mode:"))
+        self.combo_geometry = QComboBox()
+        self.combo_geometry.addItems(["half_hole", "one_hole", "two_holes"])
+        self.combo_geometry.setToolTip(
+            "half_hole  — half-pitch symmetry, hole at y=0 (fastest, default)\n"
+            "one_hole   — full single-aperture domain, hole centred at y=1.5·r\n"
+            "two_holes  — full dual-aperture domain, two holes one pitch apart"
+        )
+        control_layout.addWidget(self.combo_geometry)
+
+        # Injection time (µs) — 0 means “inject indefinitely” (current behaviour)
+        row, self.inputs["inj_time_us"] = self.create_input(
+            "Injection Time (µs):", 0.0, 1000.0, 0.01, 4
+        )
+        control_layout.addLayout(row)
+        self.inputs["inj_time_us"].setValue(0.0)  # default: unlimited injection
+
+        control_layout.addSpacing(15)
+        control_layout.addWidget(QLabel("5. NEUTRALIZER"))
+        row, self.inputs["neut_rate"] = self.create_input("e- Inject Rate:", 0.0, 1e9, 1.0, 4)
+        control_layout.addLayout(row)
+        row, self.inputs["Te"] = self.create_input("e- Temp (eV):", 0.0, 1000.0, 0.1, 4)
+        control_layout.addLayout(row)
+
+        control_layout.addSpacing(15)
+
+        self.btn_build = QPushButton("1. BUILD DOMAIN")
+        self.btn_build.clicked.connect(self.build_domain)
+        self.btn_toggle = QPushButton("2. START BEAM")
+        self.btn_toggle.clicked.connect(self.toggle_sim)
+
+        self.btn_csv = QPushButton("Export Data (.csv)")
+        self.btn_csv.clicked.connect(self.export_csv)
+
+        self.chk_track_ptcls = QCheckBox("Record Kinematics")
+        self.btn_export_trk  = QPushButton("Export Particle Data (.csv)")
+        self.btn_export_trk.clicked.connect(self.exporttrackingdata)
+
+        self.btn_iedf = QPushButton("Show Energy Dist. (IEDF/EEDF)")
+        self.btn_iedf.clicked.connect(self.open_iedf_window)
+
+        self.chk_record = QCheckBox("Record Frames (0)")
+        self.btn_save   = QPushButton("Save GIF Animation")
+        self.btn_save.clicked.connect(self.save_gif)
+
+        self.lbl_status = QLabel("Status: Ready.")
+        self.lbl_temp   = QLabel("Grid Temps: Ready")
+
+        for w in [
+            self.btn_build, self.btn_toggle, self.btn_csv, self.chk_track_ptcls,
+            self.btn_export_trk, self.btn_iedf, self.chk_record, self.btn_save,
+            self.lbl_status, self.lbl_temp
+        ]:
+            control_layout.addWidget(w)
+
+        # --- Performance Panel ---
+        perfbox    = QGroupBox("⚡ Beam Diagnostics ")
+        perflayout = QVBoxLayout()
+        perflayout.setSpacing(2)
+        perflayout.setContentsMargins(6, 4, 6, 4)
+
+        self.lblTime         = QLabel("t_sim:        — µs")
+        self.lblTransparency = QLabel("Transparency: —")
+
+        for lbl in [self.lblTime, self.lblTransparency]:
+            lbl.setStyleSheet("font-family: monospace; font-size: 11px;")
+            perflayout.addWidget(lbl)
+
+        perfbox.setLayout(perflayout)
+        control_layout.addWidget(perfbox)
+
+        scroll_area.setWidget(control_panel)
+        main_layout.addWidget(scroll_area)
+
+        self.fig = plt.figure(figsize=(12, 8))
+        self.canvas = FigureCanvas(self.fig)
+        main_layout.addWidget(self.canvas)
+
+        grid = plt.GridSpec(3, 3, height_ratios=[1.2, 1, 0.9])
+
+        # --- Row 0: wide beam plot + narrow temperature map ---
+        self.ax_live = self.fig.add_subplot(grid[0, 0:2])
+        self.ax_live.set_title("Ion Beam Extraction & Particle Tracking", fontsize=10)
+        self.ax_live.set_xlabel("Axial Position [mm]")
+        self.ax_live.set_ylabel("Radial Position [mm]")
+
+        # Narrow column: use short labels to avoid colorbar/neighbour overlap
+        self.ax_temp = self.fig.add_subplot(grid[0, 2])
+        self.ax_temp.set_title("Grid Temperature", fontsize=10)
+        self.ax_temp.set_xlabel("Axial Position [mm]", fontsize=8)
+        self.ax_temp.set_ylabel("Radial Position [mm]", fontsize=8)   # units only — avoids crowding the colorbar
+
+        # --- Row 1: damage map + diagnostics ---
+        self.ax_dmg = self.fig.add_subplot(grid[1, 0])
+        self.ax_dmg.set_title("Sputter Damage Map", fontsize=10)
+        self.ax_dmg.set_xlabel("Axial Position [mm]", fontsize=8)
+        self.ax_dmg.set_ylabel("Radial Position [mm]", fontsize=8)
+
+        self.ax_ebs = self.fig.add_subplot(grid[1, 1])
+        self.ax_ebs.set_title("Saddle-Point Potential", fontsize=10)
+        self.ax_ebs.set_xlabel("Iteration", fontsize=8)
+        self.ax_ebs.set_ylabel("[V]", fontsize=8)
+
+        self.ax_div = self.fig.add_subplot(grid[1, 2])
+        self.ax_div.set_title("Beam Divergence", fontsize=10)
+        self.ax_div.set_xlabel("Iteration", fontsize=8)
+        self.ax_div.set_ylabel("[°]", fontsize=8)
+
+        # --- Row 2: full-width erosion profile ---
+        self.ax_groove = self.fig.add_subplot(grid[2, :])
+        self.ax_groove.set_title("Accel Grid Erosion Profile", fontsize=10)
+        self.ax_groove.set_xlabel("Radial Position [mm]")
+        self.ax_groove.set_ylabel("Erosion Depth [µm]")
+        self.ax_groove.grid(True, alpha=0.3)
+        self.ax_groove.invert_yaxis()
+
+        self.line_ebs, = self.ax_ebs.plot([], [], "m-", lw=2)
+        self.line_div, = self.ax_div.plot([], [], "b-", lw=2)
+        self.line_groove, = self.ax_groove.plot([], [], "r-", lw=1.5)
+
+        self.scat_prim = None
+        self.scat_cex = None
+        self.scat_elec = self.ax_live.scatter([], [], s=1, c="#00FF00", alpha=0.5)
+
+        # h_pad / w_pad give breathing room between rows and columns
+        self.fig.tight_layout(rect=(0, 0, 0.97, 1), h_pad=1.5, w_pad=0.8)
+
+    def _apply_defaults(self):
+        """Populate the UI with safe hardcoded defaults when no config.json is present."""
+        # Beam species
+        self.beam_mass_amu  = 131.293   # Xenon
+        self.beam_charge_state = 1
+
+        # Material
+        self.mat_name  = "Molybdenum"
+        self.mat_props = GridMaterialDialog.PRESETS["Molybdenum"].copy()
+
+        # Advanced params
+        self.adv_params = {
+            "neut_x":           10.0,
+            "neut_r":            2.0,
+            "V_plasma_offset":  20.0,
+            "m_e_ratio":      1000.0,
+            "Lx":               20.0,
+            "Ly":                3.0,
+        }
+
+        # Plasma / sputtering inputs
+        self.inputs["n0_plasma"].setValue(1e17)
+        self.inputs["Te_up"].setValue(3.0)
+        self.inputs["Ti"].setValue(0.5)
+        self.inputs["Tn"].setValue(300.0)
+        self.inputs["n0"].setValue(1e18)
+        self.inputs["Accel"].setValue(1.0)
+        self.inputs["Thresh"].setValue(1e6)
+        self.inputs["inj_time_us"].setValue(0.0)
+
+        # Neutralizer
+        self.inputs["neut_rate"].setValue(0.0)
+        self.inputs["Te"].setValue(2.0)
+
+        # RF off
+        self.chk_rf.setChecked(False)
+        self.spin_rf_freq.setValue(13.56)
+        self.spin_rf_amp.setValue(0.0)
+
+        # Geometry default
+        self.combo_geometry.setCurrentText("half_hole")
+
+        # Add 3 default grids: Screen / Accel / Deccel (typical 3-grid ion optics)
+        self.clear_grid_ui()
+        self.add_grid_ui(1100.0, 0.38, 0.64, 0.80, 0.0)   # Screen grid
+        self.add_grid_ui(-200.0, 0.38, 0.64, 0.70, 0.0)   # Accel grid
+        self.add_grid_ui(  0.0,  0.38, 2.00, 0.75, 0.0)   # Deccel grid
+
+        self.lbl_status.setText("Status: No config.json found — using default values.")
+
+    def apply_config(self, config):
+        self.config = config
+        discharge_chamber = config.get("discharge_chamber", {})
+        self.pitch_mm = discharge_chamber["pitch_mm"]
+
+        beam = config.get("beam_species", {})
+        self.beam_mass_amu = beam["mass_amu"]
+        self.beam_charge_state = beam["charge_state"]
+
+        mat_cfg = config.get("grid_material", {})
+        preset = mat_cfg.get("preset", "Custom")
+        if preset in GridMaterialDialog.PRESETS and GridMaterialDialog.PRESETS[preset] is not None:
+            self.mat_name = preset
+            self.mat_props = GridMaterialDialog.PRESETS[preset].copy()
+        else:
+            self.mat_name = "Custom"
+            self.mat_props = {
+                "k": mat_cfg["k"],
+                "rho": mat_cfg["rho"],
+                "cp": mat_cfg["cp"],
+                "emissivity": mat_cfg["emissivity"],
+                "alpha": mat_cfg["alpha"],
+                "E_mod": mat_cfg["E_mod"],
+                "Y_coeff": mat_cfg["Y_coeff"],
+                "E_th": mat_cfg["E_th"],
+            }
+
+        adv = config.get("advanced_settings", {})
+        self.adv_params = {
+            "neut_x": adv["neut_x"],
+            "neut_r": adv["neut_r"],
+            "V_plasma_offset": adv["V_plasma_offset"],
+            "m_e_ratio": adv["m_e_ratio"],
+            "Lx": adv["Lx"],
+            "Ly": adv["Ly"],
+        }
+
+        sim = config.get("simulation", {})
+        self.inputs["n0_plasma"].setValue(sim["n0_plasma"])
+        self.inputs["Te_up"].setValue(sim["Te_up"])
+        self.inputs["Ti"].setValue(sim["Ti"])
+        self.inputs["Tn"].setValue(sim["Tn"])
+        self.inputs["n0"].setValue(sim["n0"])
+        self.inputs["Accel"].setValue(sim["Accel"])
+        self.inputs["Thresh"].setValue(sim["Thresh"])
+
+        mode = sim["sim_mode"]
+        idx = self.combo_mode.findText(mode)
+        if idx >= 0:
+            self.combo_mode.setCurrentIndex(idx)
+
+        geom = sim.get("geometry", "half_hole")
+        idx_geom = self.combo_geometry.findText(geom)
+        if idx_geom >= 0:
+            self.combo_geometry.setCurrentIndex(idx_geom)
+
+        rf = config.get("rf_co_extraction", {})
+        self.chk_rf.setChecked(rf["rf_enable"])
+        self.spin_rf_freq.setValue(rf["rf_freq"])
+        self.spin_rf_amp.setValue(rf["rf_amp"])
+
+        neut = config.get("neutralizer", {})
+        self.inputs["neut_rate"].setValue(neut["neut_rate"])
+        self.inputs["Te"].setValue(neut["Te"])
+
+        self.clear_grid_ui()
+        grids = config.get("grids", [])
+        if len(grids) == 0:
+            self._apply_defaults()
+            return
+
+        for g in grids:
+            self.add_grid_ui(g["V"], g["t"], g["gap"], g["r"], g["cham"])
+
+        rf_idx = rf["rf_grid_idx"]
+        if 0 <= rf_idx < self.combo_rf_grid.count():
+            self.combo_rf_grid.setCurrentIndex(rf_idx)
+
+        self.cs_store = load_cross_sections_from_config(config)
+        self.pitch_mm = config.get("discharge_chamber", {}).get("pitch_mm", 3.0)
+        self.lbl_status.setText(f"Loaded config.json | {len(grids)} grids")
+        self.lbl_temp.setText("Grid Temps: " + " | ".join([f"G{i+1}: ready" for i in range(len(grids))]))
+
+    def reload_config(self):
+        cfg = load_json_config()
+        if cfg is None:
+            QMessageBox.warning(self, "No Config Found",
+                                "config.json not found. Using current defaults.")
+            return
+        try:
+            self.apply_config(cfg)
+            QMessageBox.information(self, "Config Reloaded",
+                                    "config.json was reloaded successfully.")
+        except Exception as e:
+            QMessageBox.critical(self, "Config Error", f"Failed to reload config:\n{e}")
     def open_advanced_settings(self):
         dialog = AdvancedSettingsDialog(self.adv_params, self)
         if dialog.exec_() == QDialog.Accepted:
             self.adv_params.update(dialog.get_values())
-            QMessageBox.information(self, "Settings Updated",
-                                    "Settings saved. Click '1. BUILD DOMAIN' to apply geometry or mass changes.")
+            QMessageBox.information(
+                self, "Settings Updated",
+                "Advanced settings updated in memory. Click '1. BUILD DOMAIN' to apply."
+            )
 
     def open_beam_species(self):
         dialog = BeamSpeciesDialog(self.beam_mass_amu, self.beam_charge_state, self)
@@ -690,7 +1330,8 @@ class DigitalTwinApp(QMainWindow):
             QMessageBox.information(
                 self, "Species Updated",
                 f"Beam ion: {self.beam_mass_amu:.3f} amu, charge +{self.beam_charge_state}.\n"
-                f"Click '1. BUILD DOMAIN' to apply.")
+                f"Click '1. BUILD DOMAIN' to apply."
+            )
 
     def open_cs_viewer(self):
         if self.cs_viewer_window is None:
@@ -706,269 +1347,78 @@ class DigitalTwinApp(QMainWindow):
             QMessageBox.information(
                 self, "Material Updated",
                 f"Grid material: {self.mat_name}\n"
-                f"k={self.mat_props['k']:.1f} W/m/K, "
-                f"rho={self.mat_props['rho']:.0f} kg/m³, "
-                f"cp={self.mat_props['cp']:.0f} J/kg/K\n"
-                f"Click '1. BUILD DOMAIN' to apply.")
+                f"Click '1. BUILD DOMAIN' to apply."
+            )
 
     def apply_advanced_settings_to_sim(self):
-        """Injects advanced parameters into the sim engine before building"""
-        self.sim.Lx = self.adv_params['Lx']
-        self.sim.Ly = self.adv_params['Ly']
+        self.sim.Lx = self.adv_params["Lx"]
+        self.sim.Ly = self.adv_params["Ly"]
         self.sim.nx = int(self.sim.Lx / self.sim.dx) + 1
         self.sim.ny = int(self.sim.Ly / self.sim.dy) + 1
 
-        # Apply beam species: mass and charge
         self.sim.m_ion = self.beam_mass_amu * 1.6605e-27
-        self.sim.m_XE = self.sim.m_ion  # backward compat alias
+        self.sim.m_XE = self.sim.m_ion
         self.sim.Z_ion = self.beam_charge_state
         self.sim.q_ion = self.beam_charge_state * self.sim.q
+        self.sim.m_e = self.sim.m_ion / self.adv_params["m_e_ratio"]
 
-        self.sim.m_e = self.sim.m_ion / self.adv_params['m_e_ratio']
-
-        # Apply grid material properties
         self.sim.set_material(props=self.mat_props)
 
-        # Pass user cross-section splines to the engine
         self.sim.user_cs = {}
         for label, ds in self.cs_store.items():
-            if ds.get('spline') is not None:
+            if ds.get("spline") is not None:
                 self.sim.user_cs[label] = ds
 
         self.sim.x_pts = np.linspace(0, self.sim.Lx, self.sim.nx)
         self.sim.y_pts = np.linspace(0, self.sim.Ly, self.sim.ny)
         self.sim.X, self.sim.Y = np.meshgrid(self.sim.x_pts, self.sim.y_pts)
 
-        self.sim.T_map = np.full((self.sim.ny, self.sim.nx), 300.0, dtype=np.float32)
-        self.sim.T_map_new = np.full((self.sim.ny, self.sim.nx), 300.0, dtype=np.float32)
-        
-        # We don't need to call reset_arrays here because sim.build_domain calls it natively
-
-    def create_input(self, label_text, default_val, min_v, max_v, step, decimals=1):
-        row = QHBoxLayout()
-        lbl = QLabel(label_text); lbl.setFixedWidth(130)
-        spin = QDoubleSpinBox(); spin.setRange(min_v, max_v); spin.setValue(default_val)
-        spin.setSingleStep(step); spin.setDecimals(decimals)
-        row.addWidget(lbl); row.addWidget(spin)
-        return row, spin
-
-    def add_grid_ui(self, v_def, t_def, gap_def, r_def, cham_def):
-        idx = len(self.grid_widgets) + 1
-        gb = QGroupBox(f"Grid {idx}")
-        lay = QVBoxLayout()
-        
-        row1, spin_v = self.create_input('DC Voltage (V):', v_def, -5000, 15000, 100, 0)
-        row2, spin_t = self.create_input('Thickness (mm):', t_def, 0.1, 10.0, 0.01)
-        row3, spin_gap = self.create_input('Gap to Next (mm):', gap_def, 0.1, 10.0, 0.01)
-        row4, spin_r = self.create_input('Hole Radius (mm):', r_def, 0.1, 10.0, 0.1)
-        row5, spin_cham = self.create_input('Chamfer (°):', cham_def, 0, 45, 0.1)
-        
-        lay.addLayout(row1); lay.addLayout(row2); lay.addLayout(row3)
-        lay.addLayout(row4); lay.addLayout(row5)
-        gb.setLayout(lay)
-        self.grids_layout.insertWidget(self.grids_layout.count() - 1, gb)
-        
-        self.grid_widgets.append({
-            'gb': gb, 'V': spin_v, 't': spin_t, 'gap': spin_gap, 
-            'r': spin_r, 'cham': spin_cham
-        })
-        self.update_rf_combo()
-
-    def remove_grid_ui(self):
-        if len(self.grid_widgets) > 1:
-            gw = self.grid_widgets.pop()
-            gw['gb'].deleteLater()
-            self.update_rf_combo()
-
-    def update_rf_combo(self):
-        # Check if the combo box has been initialized yet before trying to update it
-        if hasattr(self, 'combo_rf_grid'):
-            self.combo_rf_grid.clear()
-            self.combo_rf_grid.addItems([f"Grid {i+1}" for i in range(len(self.grid_widgets))])
-
-    def setup_ui(self):
-        main_widget = QWidget()
-        self.setCentralWidget(main_widget)
-        main_layout = QHBoxLayout(main_widget)
-
-        # SCROLLABLE CONTROL PANEL
-        scroll_area = QScrollArea()
-        scroll_area.setFixedWidth(350)
-        scroll_area.setWidgetResizable(True)
-        
-        control_panel = QWidget()
-        control_layout = QVBoxLayout(control_panel)
-        self.inputs = {}
-
-        # Pre-initialize the RF Combo Box so add_grid_ui can safely update it
-        self.combo_rf_grid = QComboBox()
-
-        # 1. DYNAMIC GRIDS
-        control_layout.addWidget(QLabel('<b>1. MULTI-GRID OPTICS</b>'))
-        self.grids_layout = QVBoxLayout()
-        
-        btn_layout = QHBoxLayout()
-        btn_add = QPushButton('+ Add Grid')
-        btn_rem = QPushButton('- Remove Grid')
-        btn_add.clicked.connect(lambda: self.add_grid_ui(0, 1.0, 1.0, 1.0, 0))
-        btn_rem.clicked.connect(self.remove_grid_ui)
-        btn_layout.addWidget(btn_add); btn_layout.addWidget(btn_rem)
-        
-        self.grids_layout.addLayout(btn_layout)
-        control_layout.addLayout(self.grids_layout)
-
-        #(self, v_def, t_def, gap_def, r_def, cham_def):
-        # Initialize default 2 grids ,Values from NSTAR paper https://electricrocket.org/IEPC/85_2.pdf
-        self.add_grid_ui(1074, 0.38, 0.58, 0.955, 0)
-        self.add_grid_ui(-180, 0.51, 0.0, 0.57, 0)
-
-        control_layout.addSpacing(15)
-        
-        
-        # 2. RF CO-EXTRACTION
-        control_layout.addWidget(QLabel('<b>2. RF CO-EXTRACTION</b>'))
-        self.chk_rf = QCheckBox('Enable RF Modulated Potential')
-        control_layout.addWidget(self.chk_rf)
-        
-        rf_row = QHBoxLayout()
-        rf_row.addWidget(QLabel('Apply RF to:'))
-        rf_row.addWidget(self.combo_rf_grid)
-        control_layout.addLayout(rf_row)
-        
-        # FIX: Use distinct variables for the layout rows so they don't overwrite each other
-        row_freq, self.spin_rf_freq = self.create_input('Frequency (MHz):', 13.56, 0.1, 100, 0.1)
-        row_amp, self.spin_rf_amp = self.create_input('Amplitude (V):', 500, 0, 5000, 50, 0)
-        
-        control_layout.addLayout(row_freq)
-        control_layout.addLayout(row_amp)
-
-        control_layout.addSpacing(15)
-
-        # 3. PLASMA & SPUTTERING
-        control_layout.addWidget(QLabel('<b>3. PLASMA & SPUTTERING</b>'))
-        _, self.inputs['n0_plasma'] = self.create_input('Plasma Dens (m-3):', 1e17, 1e15, 1e19, 1e16, 0)
-        control_layout.addLayout(_)
-        _, self.inputs['Te_up'] = self.create_input('Upstream Te (eV):', 3.0, 0.1, 20.0, 0.5, 1)
-        control_layout.addLayout(_)
-        _, self.inputs['Ti'] = self.create_input('Ion Temp (eV):', 2.0, 0.1, 10, 0.5)
-        control_layout.addLayout(_)
-        _, self.inputs['Tn'] = self.create_input('Neutral Temp (K):', 300, 100, 2000, 100, 0)
-        control_layout.addLayout(_)
-        _, self.inputs['n0'] = self.create_input('Neutral Dens (m-3):', 1e20, 1e18, 1e22, 1e19, 0)
-        control_layout.addLayout(_)
-        _, self.inputs['Accel'] = self.create_input('Accel. Factor (X):', 0.1, 0.1, 1e16, 1e12, 2)
-        control_layout.addLayout(_)
-        _, self.inputs['Thresh'] = self.create_input('Cell Fail Thresh:', 10000.0, 0.1, 100000.0, 0.1)
-        control_layout.addLayout(_)
-
-        control_layout.addSpacing(15)
-        control_layout.addWidget(QLabel('<b>4. SIMULATION MODE</b>'))
-        self.combo_mode = QComboBox()
-        self.combo_mode.addItems(['Both', 'Thermal', 'Erosion'])
-        control_layout.addWidget(self.combo_mode)
-        
-        control_layout.addSpacing(15)
-        control_layout.addWidget(QLabel('<b>5. NEUTRALIZER</b>'))
-        _, self.inputs['neut_rate'] = self.create_input('e- Inject Rate:', 0, 0, 1e6, 10, 0)
-        control_layout.addLayout(_)
-        _, self.inputs['Te'] = self.create_input('e- Temp (eV):', 5.0, 0.1, 20.0, 0.5, 1)
-        control_layout.addLayout(_)
-        
-        control_layout.addSpacing(15)
-
-        # ACTION BUTTONS
-        self.btn_build = QPushButton('1. BUILD DOMAIN')
-        self.btn_build.clicked.connect(self.build_domain)
-        self.btn_toggle = QPushButton('2. START BEAM')
-        self.btn_toggle.clicked.connect(self.toggle_sim)
-        
-        self.btn_csv = QPushButton('Export Data (.csv)')
-        self.btn_csv.clicked.connect(self.export_csv)
-        self.btn_csv.setStyleSheet("background-color: #E6E6FA; font-weight: bold;")
-        
-        self.chk_track_ptcls = QCheckBox('Record Kinematics')
-        self.btn_export_trk = QPushButton('Export Particle Data (.csv)')
-        self.btn_export_trk.clicked.connect(self.export_tracking_data)
-        self.btn_export_trk.setStyleSheet("background-color: #FFDAB9; font-weight: bold;")
-        
-        self.btn_iedf = QPushButton('Show Energy Dist. (IEDF/EEDF)')
-        self.btn_iedf.clicked.connect(self.open_iedf_window)
-        self.btn_iedf.setStyleSheet("background-color: #D1F2EB; font-weight: bold;")
-        
-        self.chk_record = QCheckBox('Record Frames (0)')
-        self.btn_save = QPushButton('Save GIF Animation')
-        self.btn_save.clicked.connect(self.save_gif)
-        
-        self.lbl_status = QLabel('Status: Ready.')
-        self.lbl_temp = QLabel('Grid Temps: Ready')
-        self.lbl_temp.setStyleSheet("color: #D35400; font-weight: bold;") 
-
-        for w in [self.btn_build, self.btn_toggle, self.btn_csv, self.chk_track_ptcls, 
-                  self.btn_export_trk, self.btn_iedf, self.chk_record, self.btn_save, 
-                  self.lbl_status, self.lbl_temp]:
-            control_layout.addWidget(w)
-            
-        scroll_area.setWidget(control_panel)
-        main_layout.addWidget(scroll_area)
-
-        # PLOTTING
-        self.fig = plt.figure(figsize=(12, 8))
-        self.canvas = FigureCanvas(self.fig)
-        main_layout.addWidget(self.canvas)
-
-        grid = plt.GridSpec(3, 3, height_ratios=[1.2, 1, 0.9])
-        self.ax_live = self.fig.add_subplot(grid[0, 0:2]); self.ax_live.set_title('Beam trajectory')
-        self.ax_temp = self.fig.add_subplot(grid[0, 2]); self.ax_temp.set_title('Grid Temp Map (°C)')
-        self.ax_dmg = self.fig.add_subplot(grid[1, 0]); self.ax_dmg.set_title('Damage Map')
-        self.ax_ebs = self.fig.add_subplot(grid[1, 1]); self.ax_ebs.set_title('Centerline Min Potential (V)')
-        self.ax_div = self.fig.add_subplot(grid[1, 2]); self.ax_div.set_title('Beam Divergence')
-        self.ax_groove = self.fig.add_subplot(grid[2, :])
-        self.ax_groove.set_title('Accel Grid Erosion Profile')
-        self.ax_groove.set_xlabel('Radial Position (mm)')
-        self.ax_groove.set_ylabel('Erosion Depth (µm)')
-        self.ax_groove.grid(True, alpha=0.3)
-        self.ax_groove.invert_yaxis()  # depth grows downward, like profilometry plots
-
-        self.line_ebs, = self.ax_ebs.plot([], [], 'm-', lw=2)
-        self.line_div, = self.ax_div.plot([], [], 'b-', lw=2)
-        self.line_groove, = self.ax_groove.plot([], [], 'r-', lw=1.5)
-
-        self.scat_prim = None
-        self.scat_cex = None
-        self.scat_elec = self.ax_live.scatter([], [], s=1, c='#00FF00', alpha=0.5)
-        self.fig.tight_layout()
+        # Do not create T_map / T_map_new here.
+        # physics_engine.build_domain() creates all field arrays again
+        # after computing the final geometry-dependent Ly.
 
     def get_params(self):
         params = {k: v.value() for k, v in self.inputs.items()}
-        
-        # Inject the advanced dialog settings directly into the params dictionary 
-        # so the physics engine can receive them without modification
         params.update(self.adv_params)
-        
-        params['sim_mode'] = self.combo_mode.currentText()
-        params['rf_enable'] = self.chk_rf.isChecked()
-        params['rf_grid_idx'] = self.combo_rf_grid.currentIndex()
-        params['rf_freq'] = self.spin_rf_freq.value()
-        params['rf_amp'] = self.spin_rf_amp.value()
-        
+        params["sim_mode"] = self.combo_mode.currentText()
+        params["geometry"] = self.combo_geometry.currentText()
+        params["rf_enable"] = self.chk_rf.isChecked()
+        params["rf_grid_idx"] = self.combo_rf_grid.currentIndex()
+        params["rf_freq"] = self.spin_rf_freq.value()
+        params["rf_amp"] = self.spin_rf_amp.value()
+        params["pitch_mm"] = getattr(self, "pitch_mm", 0.0)
+
         grids = []
         for gw in self.grid_widgets:
             grids.append({
-                'V': gw['V'].value(),
-                't': gw['t'].value(),
-                'gap': gw['gap'].value(),
-                'r': gw['r'].value(),
-                'cham': gw['cham'].value()
+                "V": gw["V"].value(),
+                "t": gw["t"].value(),
+                "gap": gw["gap"].value(),
+                "r": gw["r"].value(),
+                "cham": gw["cham"].value(),
             })
-        params['grids'] = grids
+        params["grids"] = grids
+
+        inj_time_us = self.inputs.get("inj_time_us", None)
+        if inj_time_us is not None:
+            params["inj_time"] = inj_time_us.value() * 1e-6
+        else:
+            params["inj_time"] = 0.0
+
+        params['macro_weight'] = self.sim.macro_weight   # ← ADD THIS
         return params
 
     def toggle_sim(self):
         if not np.any(self.sim.Ex):
             QMessageBox.warning(self, "Warning", "Build Domain first!")
             return
+
+        # If we are starting (not pausing), ensure injection is enabled again
+        if not self.sim_isRunning:
+            self.sim.injection_enabled = True
+
         self.sim_isRunning = not self.sim_isRunning
-        self.btn_toggle.setText('PAUSE BEAM' if self.sim_isRunning else 'RESUME BEAM')
+        self.btn_toggle.setText("PAUSE BEAM" if self.sim_isRunning else "RESUME BEAM")
 
     def open_iedf_window(self):
         if self.iedf_window is None:
@@ -977,358 +1427,681 @@ class DigitalTwinApp(QMainWindow):
 
     def build_domain(self):
         self.sim_isRunning = False
-        self.btn_toggle.setText('2. START BEAM')
-        self.iter_history.clear(); self.ebs_history.clear(); self.div_history.clear()
-        
+        self.btn_toggle.setText("2. START BEAM")
+        self.iter_history.clear()
+        self.ebs_history.clear()
+        self.div_history.clear()
+        self.time_history.clear()
+        self.lblTime.setText("t_sim:        — µs")
         self.T_histories = {i: [] for i in range(len(self.grid_widgets))}
-        self.tracking_buffer.clear() 
-        
-        self.lbl_status.setText('Building Multi-Grid Domain...')
-        QApplication.processEvents() 
-        
-        # Apply the advanced properties BEFORE generating the domain mesh
+        self.tracking_buffer.clear()
+
+        self.lbl_status.setText("Building Multi-Grid Domain...")
+        QApplication.processEvents()
+
         self.apply_advanced_settings_to_sim()
-        
         self.sim.build_domain(self.get_params())
         self.draw_static_domain()
-        
-        species_str = f'{self.beam_mass_amu:.1f} amu, +{self.beam_charge_state}'
-        cs_count = sum(1 for ds in self.cs_store.values() if ds.get('spline') is not None)
-        cs_str = f' | {cs_count} CS loaded' if cs_count > 0 else ''
-        self.lbl_status.setText(f'Domain Ready. Wt: {self.sim.macro_weight:.1e} | {species_str} | {self.mat_name}{cs_str}')
-        self.lbl_temp.setText('Grid Temps: ' + ' | '.join([f'G{i+1}: 26°C' for i in range(len(self.grid_widgets))]))
+
+        species_str = f"{self.beam_mass_amu:.3f} amu, +{self.beam_charge_state}"
+        cs_count = sum(1 for ds in self.cs_store.values() if ds.get("spline") is not None)
+        cs_str   = f" | {cs_count} CS loaded" if cs_count > 0 else ""
+        self.lbl_status.setText(
+            f"Domain Ready. Wt: {self.sim.macro_weight:.1e} | {species_str} | {self.mat_name}{cs_str}"
+        )
+        self.lbl_temp.setText(
+            "Grid Temps: " + " | ".join([f"G{i+1}: 26°C" for i in range(len(self.grid_widgets))])
+        )
 
     def draw_static_domain(self):
-        self.temp_mesh = None
+        self.tempmesh = None
         self.dmg_mesh = None
+
         self.ax_live.clear()
-        self.ax_live.contourf(self.sim.X, self.sim.Y, self.sim.V, 20, cmap='viridis', alpha=0.4) 
-        
+        self.ax_live.set_title("Ion Beam Extraction & Particle Tracking", fontsize=10)
+        self.ax_live.set_xlabel("Axial Position [mm]")
+        self.ax_live.set_ylabel("Radial Position [mm]")
+        self.ax_live.contourf(self.sim.X, self.sim.Y, self.sim.V, 20, cmap="viridis", alpha=0.4)
+
         gy, gx = np.where(self.sim.isBound)
-        self.ax_live.scatter(gx * self.sim.dx, gy * self.sim.dy, s=12, c='k', alpha=0.8)
-        
-        max_v = max([g['V'].value() for g in self.grid_widgets]) if self.grid_widgets else 1000
-        
-        self.scat_prim = self.ax_live.scatter([], [], c=[], s=2, cmap='turbo', vmin=0, vmax=max_v+50, alpha=0.8)
-        self.scat_cex = self.ax_live.scatter([], [], c=[], s=7, cmap='turbo', vmin=0, vmax=max_v+50, alpha=1.0)
+        self.ax_live.scatter(gx * self.sim.dx, gy * self.sim.dy, s=4, c="k", alpha=0.8)
+
+        max_v = max(gw['V'].value() for gw in self.grid_widgets) if self.grid_widgets else 1000.0
+        self.scat_prim = self.ax_live.scatter([], [], c=[], s=2, cmap='turbo', vmin=0, vmax=max_v+300, alpha=0.8)
+        self.scat_cex = self.ax_live.scatter([], [], c=[], s=3, cmap='turbo', vmin=0, vmax=max_v+300, alpha=1.0)
         self.scat_elec = self.ax_live.scatter([], [], s=1, c='#00FF00', alpha=0.5)
-        
-        if not hasattr(self, 'cax_live'):
+
+        if not hasattr(self, "cax_live"):
             divider = make_axes_locatable(self.ax_live)
-            self.cax_live = divider.append_axes("right", size="3%", pad=0.1) 
+            self.cax_live = divider.append_axes("right", size="3%", pad=0.1)
         else:
             self.cax_live.clear()
-            
+
         self.cbar_energy = self.fig.colorbar(self.scat_prim, cax=self.cax_live)
-        self.cbar_energy.set_label('Kinetic Energy (eV)')
-        
+        self.cbar_energy.ax.set_title("[eV]", fontsize=8, pad=3)
+
         self.ax_live.set_xlim(0, self.sim.Lx)
         self.ax_live.set_ylim(0, self.sim.Ly)
-        self.ax_live.set_title('Beam Extraction & Tracking')
+        self.ax_live.set_title("Beam Extraction & Tracking")
         self.canvas.draw_idle()
+        if self.sim.Tmap is not None and len(self.sim.mask_grids) > 0:
+            grid_mask = np.zeros_like(self.sim.isBound, dtype=bool)
+            for mg in self.sim.mask_grids:
+                if mg.shape == grid_mask.shape:
+                    grid_mask |= mg
+            TdisplayC = np.where(grid_mask, self.sim.Tmap - 273.15, np.nan)
+
+            self.ax_temp.clear()
+            self.ax_temp.set_title("Grid Temp Map °C")
+            self.ax_temp.set_facecolor("black")
+            self.tempmesh = self.ax_temp.pcolormesh(
+                self.sim.X, self.sim.Y, TdisplayC,
+                cmap="inferno", shading="nearest"
+            )
+            if not hasattr(self, "cax_temp"):
+                dividert = make_axes_locatable(self.ax_temp)
+                self.cax_temp = dividert.append_axes("right", size="5%", pad=0.1)
+            else:
+                self.cax_temp.clear()
+            self.cbartemp = self.fig.colorbar(self.tempmesh, cax=self.cax_temp)
+            self.cbartemp.set_label("Temperature °C")
+            self.ax_temp.set_xlim(0, self.sim.Lx)
+            self.ax_temp.set_ylim(0, self.sim.Ly)
 
     def run_sim_step(self):
-        if not self.sim_isRunning: return
+        if not self.sim_isRunning:
+            return
 
-        remeshed, min_pot, current_div, T_grids = self.sim.step(self.get_params())
+        params = self.get_params()
+        step_out = self.sim.step(params)
+        if len(step_out) == 5:
+            remeshed, min_pot, current_div, T_grids, trans_last_frame = step_out
+        else:
+            remeshed, min_pot, current_div, T_grids = step_out
+            trans_last_frame = 0.0
+
+        inj_time = params.get("inj_time", 0.0)
+        inj_limited = inj_time > 0.0
+
+        if inj_limited and (not self.sim.injection_enabled) and (not self.sim.has_active_particles()):
+            self.sim_isRunning = False
+            self.btn_toggle.setText("2. START BEAM")
+            self.lbl_status.setText("Status: Injection completed and all particles removed. Simulation stopped.")
+            return
+
+        t_sim = self.sim.iteration * self.sim.dt
+        transparency = self.sim.get_transparency()
+
+        self.lblTime.setText(f"t_sim: {t_sim * 1e6:.2f} µs")
+        self.lblTransparency.setText(
+            f"Transparency tot: {transparency:.3f}\n"
+            f"Transparency frame: {trans_last_frame:.3f}\n"
+            f"Exit vx mean: {self.sim.exit_vx_mean: .2e} m/s\n"
+            f"Exit |v| mean: {self.sim.exit_v_mean: .2e} m/s\n"
+            f"Exit E mean: {self.sim.exit_energy_mean_eV: .1f} eV\n"
+            f"Exit count step: {self.sim.exit_count_step}"
+        )
         QApplication.processEvents()
 
         if remeshed:
-            self.lbl_status.setText('Domain Remeshed (Thermal or Erosion)!')
+            self.lbl_status.setText("Domain Remeshed (Thermal or Erosion)!")
             self.draw_static_domain()
 
-        if self.sim.iteration % 5 == 0:
-            prim_mask = ~self.sim.p_isCEX
-            cex_mask = self.sim.p_isCEX
-            
-            self.scat_prim.set_offsets(np.column_stack((self.sim.p_x[prim_mask], self.sim.p_y[prim_mask])) if np.any(prim_mask) else np.empty((0, 2)))
-            self.scat_cex.set_offsets(np.column_stack((self.sim.p_x[cex_mask], self.sim.p_y[cex_mask])) if np.any(cex_mask) else np.empty((0, 2)))
-            self.scat_elec.set_offsets(np.column_stack((self.sim.e_x, self.sim.e_y)) if len(self.sim.e_x) > 0 else np.empty((0, 2)))
+        if self.sim.iteration % 1 == 0 and self.scat_prim is not None and self.scat_cex is not None:
+            p_x = self.sim.p_x[:self.sim.num_p]
+            p_y = self.sim.p_y[:self.sim.num_p]
+            p_vx = self.sim.p_vx[:self.sim.num_p]
+            p_vy = self.sim.p_vy[:self.sim.num_p]
+            p_vz = self.sim.p_vz[:self.sim.num_p]
+            p_is_cex = self.sim.p_isCEX[:self.sim.num_p]
+
+            e_x = self.sim.e_x[:self.sim.num_e]
+            e_y = self.sim.e_y[:self.sim.num_e]
+            e_vx = self.sim.e_vx[:self.sim.num_e]
+            e_vy = self.sim.e_vy[:self.sim.num_e]
+
+            prim_mask = ~p_is_cex
+            cex_mask = p_is_cex
+
+            self.scat_prim.set_offsets(
+                np.column_stack((p_x[prim_mask], p_y[prim_mask]))
+                if np.any(prim_mask) else np.empty((0, 2))
+            )
+            self.scat_cex.set_offsets(
+                np.column_stack((p_x[cex_mask], p_y[cex_mask]))
+                if np.any(cex_mask) else np.empty((0, 2))
+            )
+            self.scat_elec.set_offsets(
+                np.column_stack((e_x, e_y))
+                if len(e_x) > 0 else np.empty((0, 2))
+            )
 
             if np.any(prim_mask):
-                v_sq_prim = self.sim.p_vx[prim_mask]**2 + self.sim.p_vy[prim_mask]**2
+                v_sq_prim = p_vx[prim_mask]**2 + p_vy[prim_mask]**2 + p_vz[prim_mask]**2
                 self.scat_prim.set_array((0.5 * self.sim.m_ion * v_sq_prim) / self.sim.q)
 
             if np.any(cex_mask):
-                v_sq_cex = self.sim.p_vx[cex_mask]**2 + self.sim.p_vy[cex_mask]**2
+                v_sq_cex = p_vx[cex_mask]**2 + p_vy[cex_mask]**2 + p_vz[cex_mask]**2
                 self.scat_cex.set_array((0.5 * self.sim.m_ion * v_sq_cex) / self.sim.q)
 
             if self.iedf_window and self.iedf_window.isVisible():
-                max_v = max([g['V'].value() for g in self.grid_widgets]) if self.grid_widgets else 1000
+                max_v = max([g["V"].value() for g in self.grid_widgets]) if self.grid_widgets else 1000.0
                 self.iedf_window.update_histogram(
-                    self.sim.p_vx, self.sim.p_vy, self.sim.p_isCEX,
-                    self.sim.e_x, self.sim.e_vx, self.sim.e_vy,
+                    p_vx, p_vy, p_is_cex,
+                    e_x, e_vx, e_vy,
                     self.sim.m_ion, self.sim.m_e, self.sim.q, max_v
                 )
 
-            if self.chk_track_ptcls.isChecked():
-                ptcl_data = self.sim.get_particle_kinematics()
-                if ptcl_data.size > 0: self.tracking_buffer.append(ptcl_data)
+        if self.chk_track_ptcls.isChecked():
+            ptcl_data = self.sim.get_particle_kinematics()
+            if ptcl_data.size > 0:
+                self.tracking_buffer.append(ptcl_data)
 
-            self.iter_history.append(self.sim.iteration)
-            self.ebs_history.append(min_pot)
-            self.div_history.append(current_div)
-            for i, T in enumerate(T_grids):
-                self.T_histories[i].append(T)
+        self.iter_history.append(self.sim.iteration)
+        self.ebs_history.append(min_pot)
+        self.div_history.append(current_div)
+        self.time_history.append(t_sim)
+        self.transparency_history.append(transparency)
+        self.transparency3_history.append(trans_last_frame)
 
-            self.line_ebs.set_data(self.iter_history, self.ebs_history)
-            self.line_div.set_data(self.iter_history, self.div_history)
-            
-            self.ax_ebs.set_xlim(max(0, self.sim.iteration - 400), max(100, self.sim.iteration))
-            self.ax_ebs.set_ylim(min(-30, min(self.ebs_history)), max(10, max(self.ebs_history)))
-            self.ax_div.set_xlim(max(0, self.sim.iteration - 400), max(100, self.sim.iteration))
+        for i, T in enumerate(T_grids):
+            self.T_histories[i].append(T)
+
+        self.line_ebs.set_data(self.iter_history, self.ebs_history)
+        self.line_div.set_data(self.iter_history, self.div_history)
+
+        self.ax_ebs.set_xlim(max(0, self.sim.iteration - 400), max(100, self.sim.iteration))
+        self.ax_div.set_xlim(max(0, self.sim.iteration - 400), max(100, self.sim.iteration))
+
+        if len(self.ebs_history) > 0:
+            y_min = min(self.ebs_history)
+            y_max = max(self.ebs_history)
+            if y_max <= y_min:
+                y_max = y_min + 1.0
+            pad = max(5.0, 0.1 * (y_max - y_min))
+            self.ax_ebs.set_ylim(y_min - pad, y_max + pad)
+
+        finite_div = [d for d in self.div_history if np.isfinite(d)]
+        if len(finite_div) > 0:
+            div_max = max(finite_div)
+            self.ax_div.set_ylim(0, max(45, div_max * 1.1))
+        else:
             self.ax_div.set_ylim(0, 45)
 
-            # --- Accel Grid Erosion Profile ---
-            # Default: second grid (index 1) = accelerator. Falls back to the
-            # first grid if only one exists. Combines full-cell breakage depth
-            # with the sub-cell fractional damage for smooth updates.
-            groove_idx = 1 if len(self.sim.mask_grids) > 1 else 0
-            thresh_val = self.inputs['Thresh'].value() if 'Thresh' in self.inputs else None
-            # Face to sample: 'upstream' (plasma-facing / front), 'downstream'
-            # (exit face, where CEX backstreaming carves pits-and-grooves), or
-            # 'any' (envelope across the full axial extent).
-            groove_face = 'downstream'
-            y_mm, depth_um = self.sim.get_groove_profile(
-                groove_idx, thresh=thresh_val, face=groove_face)
-            if y_mm.size > 0:
-                self.line_groove.set_data(y_mm, depth_um)
-                self.ax_groove.set_xlim(0, float(y_mm.max()))
-                dmax = float(depth_um.max())
-                # invert_yaxis is on, so ylim is (bottom=deeper, top=surface)
-                self.ax_groove.set_ylim(max(dmax * 1.1, 1.0), 0.0)
-                self.ax_groove.set_title(
-                    f'Accel Grid Erosion Profile — {groove_face} face (Grid {groove_idx + 1})')
+        groove_idx = 1 if len(self.sim.mask_grids) > 1 else 0
+        groove_face = "downstream"
+        y_mm, depth_um = self.sim.get_groove_profile(
+            groove_idx,
+            thresh=self.inputs["Thresh"].value(),
+            face=groove_face
+        )
+        if y_mm.size > 0:
+            self.line_groove.set_data(y_mm, depth_um)
+            self.ax_groove.set_xlim(0, float(y_mm.max()))
+            dmax = float(depth_um.max()) if depth_um.size > 0 else 0.0
+            self.ax_groove.set_ylim(max(dmax * 1.1, 1.0), 0.0)
+            self.ax_groove.set_title(
+                f"Accel Grid Erosion Profile — {groove_face} face (Grid {groove_idx + 1})"
+            )
 
-            if np.any(self.sim.isBound):
-                T_display_C = np.where(self.sim.isBound, self.sim.T_map - 273.15, np.nan)
+        if self.sim.Tmap is not None and len(self.sim.mask_grids) > 0:
+            grid_mask = np.zeros_like(self.sim.isBound, dtype=bool)
+            for mg in self.sim.mask_grids:
+                if mg.shape == grid_mask.shape:
+                    grid_mask |= mg
 
-                temp_mesh = getattr(self, 'temp_mesh', None)
-                if temp_mesh is None or temp_mesh.get_array().size != T_display_C.size:
-                    self.ax_temp.clear()
-                    self.ax_temp.set_title('Grid Temp Map (°C)')
-                    self.ax_temp.set_facecolor('black')
-                    self.temp_mesh = self.ax_temp.pcolormesh(
-                        self.sim.X, self.sim.Y, T_display_C,
-                        cmap='inferno', shading='nearest')
-                    if not hasattr(self, 'cax_temp'):
-                        divider_t = make_axes_locatable(self.ax_temp)
-                        self.cax_temp = divider_t.append_axes("right", size="5%", pad=0.1)
-                    else:
-                        self.cax_temp.clear()
-                    self.cbar_temp = self.fig.colorbar(self.temp_mesh, cax=self.cax_temp)
-                    self.cbar_temp.set_label('Temperature (°C)')
+            T_display_C = np.where(grid_mask, self.sim.Tmap - 273.15, np.nan)
+
+            if getattr(self, "tempmesh", None) is None or self.tempmesh.get_array().size != T_display_C.size:
+                self.ax_temp.clear()
+                self.ax_temp.set_title("Grid Temp Map (°C)")
+                self.ax_temp.set_facecolor("black")
+
+                self.tempmesh = self.ax_temp.pcolormesh(
+                    self.sim.X, self.sim.Y, T_display_C,
+                    cmap="inferno", shading="nearest"
+                )
+
+                if not hasattr(self, "cax_temp"):
+                    divider_t = make_axes_locatable(self.ax_temp)
+                    self.cax_temp = divider_t.append_axes("right", size="5%", pad=0.1)
                 else:
-                    self.temp_mesh.set_array(T_display_C.ravel())
-                    vmin = np.nanmin(T_display_C)
-                    vmax = np.nanmax(T_display_C)
-                    if np.isfinite(vmin) and np.isfinite(vmax) and vmax > vmin:
-                        self.temp_mesh.set_clim(vmin, vmax)
+                    self.cax_temp.clear()
 
-                total_len = 1.0 + sum([g['t'].value() + g['gap'].value() for g in self.grid_widgets])
-                self.ax_temp.set_xlim(0.8, total_len + 0.2)
-
-            dmg_mesh = getattr(self, 'dmg_mesh', None)
-            if dmg_mesh is None or dmg_mesh.get_array().size != self.sim.damage_map.size:
-                self.ax_dmg.clear()
-                self.ax_dmg.set_title('Damage Map')
-                self.dmg_mesh = self.ax_dmg.pcolormesh(
-                    self.sim.X, self.sim.Y, self.sim.damage_map,
-                    cmap='hot', shading='nearest')
-                gy, gx = np.where(self.sim.isBound)
-                self.ax_dmg.scatter(gx * self.sim.dx, gy * self.sim.dy, s=2, c='grey', alpha=0.5)
-                self.ax_dmg.set_xlim(0, self.sim.Lx)
-                self.ax_dmg.set_ylim(0, self.sim.Ly)
+                self.cbar_temp = self.fig.colorbar(self.tempmesh, cax=self.cax_temp)
+                self.cbar_temp.set_label("Temperature (°C)")
             else:
-                self.dmg_mesh.set_array(self.sim.damage_map.ravel())
-                dmg_max = float(np.max(self.sim.damage_map))
-                if dmg_max > 0:
-                    self.dmg_mesh.set_clim(0, dmg_max)
+                self.tempmesh.set_array(T_display_C.ravel())
+                finite_vals = T_display_C[np.isfinite(T_display_C)]
+                if finite_vals.size > 0:
+                    vmin = float(np.min(finite_vals))
+                    vmax = float(np.max(finite_vals))
+                    if vmax <= vmin:
+                        vmax = vmin + 1.0
+                    self.tempmesh.set_clim(vmin, vmax)
 
-            self.lbl_status.setText(f'Ions: {len(self.sim.p_x)} | e-: {len(self.sim.e_x)} | Iter: {self.sim.iteration}')
-            t_str = ' | '.join([f'G{i+1}: {int(T-273.15)}°C' for i, T in enumerate(T_grids)])
-            self.lbl_temp.setText('Grid Temps: ' + t_str)
-            self.canvas.draw_idle()
+            self.ax_temp.set_xlim(0, self.sim.Lx)
+            self.ax_temp.set_ylim(0, self.sim.Ly)
 
-            if self.chk_record.isChecked():
-                self.recorded_frames.append(self.canvas.grab().toImage())
-                self.chk_record.setText(f'Record Frames ({len(self.recorded_frames)})')
+        if getattr(self, "dmg_mesh", None) is None or self.dmg_mesh.get_array().size != self.sim.damage_map.size:
+            self.ax_dmg.clear()
+            self.ax_dmg.set_title("Sputter Damage Map", fontsize=10)
+            self.ax_dmg.set_xlabel("Axial Position [mm]", fontsize=8)
+            self.ax_dmg.set_ylabel("r [mm]", fontsize=8)
+            self.dmg_mesh = self.ax_dmg.pcolormesh(
+                self.sim.X, self.sim.Y, self.sim.damage_map,
+                cmap="hot", shading="nearest"
+            )
+            gy, gx = np.where(self.sim.isBound)
+            self.ax_dmg.scatter(gx * self.sim.dx, gy * self.sim.dy, s=2, c="grey", alpha=0.5)
+            self.ax_dmg.set_xlim(0, self.sim.Lx)
+            self.ax_dmg.set_ylim(0, self.sim.Ly)
+        else:
+            self.dmg_mesh.set_array(self.sim.damage_map.ravel())
+            dmg_max = float(np.max(self.sim.damage_map))
+            if dmg_max > 0:
+                self.dmg_mesh.set_clim(0, dmg_max)
+
+        self.lbl_status.setText(
+            f"Ions {self.sim.num_p} e- {self.sim.num_e} Iter {self.sim.iteration}"
+        )
+
+        t_str = " | ".join([f"G{i+1}: {T - 273.15:.1f}°C" for i, T in enumerate(T_grids)])
+        self.lbl_temp.setText("Grid Temps: " + t_str)
+
+        self.canvas.draw_idle()
+
+        if self.chk_record.isChecked():
+            self.recorded_frames.append(self.canvas.grab())
+            self.chk_record.setText(f"Record Frames ({len(self.recorded_frames)})")
+
+    def _create_progress_dialog(self, title, label, total):
+        progress = QProgressDialog(label, "Cancel", 0, max(1, total), self)
+        progress.setWindowTitle(title)
+        progress.setWindowModality(Qt.WindowModal)
+        progress.setMinimumDuration(0)
+        progress.setAutoClose(False)
+        progress.setAutoReset(False)
+        progress.setValue(0)
+        progress.show()
+        QApplication.processEvents()
+        return progress
 
     def export_csv(self):
-        if not self.iter_history:
-            QMessageBox.warning(self, "Error", "No telemetry data to export! Run the simulation first.")
+        n = len(self.iter_history)
+        if n == 0:
+            QMessageBox.warning(self, "No Data", "No simulation history data to export.")
             return
-        
+
+        startdir = _safe_start_dir()
+        if not os.access(startdir, os.W_OK):
+            startdir = os.path.expanduser("~")
+        suggested = os.path.join(startdir, time.strftime("pybemcs_%Y%m%d%H%M%S.csv"))
+
+        file_name, _ = QFileDialog.getSaveFileName(self, "Export Data", suggested, "CSV Files (*.csv)")
+        if not file_name:
+            return
+
         was_running = self.sim_isRunning
         self.sim_isRunning = False
-        try:
-            suggested = os.path.join(
-                _safe_start_dir(),
-                time.strftime("pybemcs_telemetry_%Y%m%d_%H%M%S.csv"),
-            )
-            file_name, _ = QFileDialog.getSaveFileName(
-                self, "Save Telemetry", suggested, "CSV Files (*.csv)",
-                options=QFileDialog.DontUseNativeDialog | QFileDialog.DontResolveSymlinks,
-            )
-        finally:
-            self.sim_isRunning = was_running
-        if file_name:
-            try:
-                with open(file_name, mode='w', newline='') as file:
-                    writer = csv.writer(file)
-                    
-                    headers = ['Iteration', 'Min_Potential_V', 'Divergence_Deg']
-                    headers.extend([f'Grid_{i+1}_Temp_C' for i in range(len(self.T_histories))])
-                    writer.writerow(headers)
-                    
-                    for i in range(len(self.iter_history)):
-                        row = [
-                            self.iter_history[i], 
-                            round(self.ebs_history[i], 2), 
-                            round(self.div_history[i], 2) if not np.isnan(self.div_history[i]) else ""
-                        ]
-                        for g in range(len(self.T_histories)):
-                            row.append(round(self.T_histories[g][i] - 273.15, 1))
-                        writer.writerow(row)
-                        
-                QMessageBox.information(self, "Success", f"Telemetry Exported to {file_name}")
-            except Exception as e:
-                QMessageBox.critical(self, "Export Error", f"Failed to write file:\n{str(e)}")
 
-    def export_tracking_data(self):
-        if not self.tracking_buffer:
-            QMessageBox.warning(self, "Error", "No tracking data recorded! Check 'Record Kinematics' and run beam.")
+        progress = self._create_progress_dialog("Exporting CSV Data", "Preparing CSV export...", n)
+        cancelled = False
+
+        try:
+            with open(file_name, "w", newline="", encoding="utf-8") as f:
+                writer = csv.writer(f)
+                header = [
+                    'iteration', 't_sim_s',
+                    'minpotential',
+                    'beamdivergencedeg',
+                    'transparency'
+                ]
+                for i in range(len(self.T_histories)):
+                    header.append(f"grid_{i+1}_temp_K")
+                writer.writerow(header)
+
+                chunk_size = max(1, n // 100)
+                for j in range(n):
+                    if progress.wasCanceled():
+                        cancelled = True
+                        break
+
+                    row = [
+                        self.iter_history[j],
+                        self.time_history[j] if j < len(self.time_history) else '',
+                        self.ebs_history[j],
+                        self.div_history[j],
+                        self.transparency_history[j] if j < len(self.transparency_history) else ''
+                    ]
+                    for i in range(len(self.T_histories)):
+                        row.append(self.T_histories[i][j] if j < len(self.T_histories[i]) else "")
+                    writer.writerow(row)
+
+                    if (j + 1) % chunk_size == 0 or j == n - 1:
+                        pct = int(((j + 1) / n) * 100)
+                        progress.setValue(j + 1)
+                        progress.setLabelText(f"Writing row {j+1} of {n} ({pct}%)...")
+                        self.lbl_status.setText(f"Exporting CSV: {j+1}/{n} ({pct}%)...")
+                        QApplication.processEvents()
+
+            if cancelled:
+                if os.path.exists(file_name):
+                    try:
+                        os.remove(file_name)
+                    except Exception:
+                        pass
+                self.lbl_status.setText("CSV export cancelled.")
+                QMessageBox.information(self, "Cancelled", "CSV export was cancelled.")
+            else:
+                progress.setValue(n)
+                self.lbl_status.setText(f"CSV saved: {file_name}")
+                QMessageBox.information(self, "Success", f"CSV exported:\n{file_name}")
+        except Exception as e:
+            self.lbl_status.setText("CSV export failed.")
+            QMessageBox.critical(self, "Export Error", f"Failed to export CSV:\n{e}")
+        finally:
+            progress.close()
+            self.sim_isRunning = was_running
+
+    def exporttrackingdata(self):
+        if len(self.tracking_buffer) == 0:
+            QMessageBox.warning(self, "No Data", "No particle tracking data recorded.")
             return
-            
+
+        startdir = _safe_start_dir()
+        if not os.access(startdir, os.W_OK):
+            startdir = os.path.expanduser("~")
+
+        suggested = os.path.join(startdir, time.strftime("pybemcs_particles_%Y%m%d%H%M%S.csv"))
+        filename, _ = QFileDialog.getSaveFileName(
+            self, "Export Particle Data", suggested, "CSV Files (*.csv)"
+        )
+        if not filename:
+            return
+
         was_running = self.sim_isRunning
         self.sim_isRunning = False
+
         try:
-            suggested = os.path.join(
-                _safe_start_dir(),
-                time.strftime("pybemcs_particles_%Y%m%d_%H%M%S.csv"),
-            )
-            file_name, _ = QFileDialog.getSaveFileName(
-                self, "Save Particle Kinematics", suggested, "CSV Files (*.csv)",
-                options=QFileDialog.DontUseNativeDialog | QFileDialog.DontResolveSymlinks,
-            )
-        finally:
-            self.sim_isRunning = was_running
-        if file_name:
+            data = np.vstack(self.tracking_buffer)
+            n_rows = len(data)
+            ncols = data.shape[1] if data.ndim > 1 else 0
+
+            if ncols == 8:
+                header = ['time_s', 'x_mm', 'y_mm', 'vx_ms', 'vy_ms', 'vz_ms', 'energy_eV', 'type']
+            elif ncols == 6:
+                header = ['x_mm', 'y_mm', 'vx_ms', 'vy_ms', 'vz_ms', 'isCEX']
+            else:
+                header = [f"col_{c}" for c in range(ncols)]
+
+            progress = self._create_progress_dialog("Exporting Particle Data", "Writing particle tracking CSV...", n_rows)
+            cancelled = False
+
+            chunk_size = max(500, n_rows // 100)
+            with open(filename, 'w', newline='', encoding='utf-8') as f:
+                writer = csv.writer(f)
+                writer.writerow(header)
+
+                for idx in range(0, n_rows, chunk_size):
+                    if progress.wasCanceled():
+                        cancelled = True
+                        break
+
+                    chunk = data[idx:idx + chunk_size]
+                    writer.writerows(chunk.tolist())
+
+                    written = min(idx + chunk_size, n_rows)
+                    pct = int((written / n_rows) * 100)
+                    progress.setValue(written)
+                    progress.setLabelText(f"Writing particle {written} of {n_rows} ({pct}%)...")
+                    self.lbl_status.setText(f"Exporting particles: {written}/{n_rows} ({pct}%)...")
+                    QApplication.processEvents()
+
+            if cancelled:
+                if os.path.exists(filename):
+                    try:
+                        os.remove(filename)
+                    except Exception:
+                        pass
+                self.lbl_status.setText("Particle export cancelled.")
+                QMessageBox.information(self, "Cancelled", "Particle data export was cancelled.")
+            else:
+                progress.setValue(n_rows)
+                self.lbl_status.setText(f"Particle data exported: {filename}")
+                QMessageBox.information(self, "Success", f"Particle data exported:\n{filename}")
+        except PermissionError:
+            alt = os.path.join(os.path.expanduser("~"), os.path.basename(filename))
             try:
-                self.lbl_status.setText('Exporting huge data file. Please wait...')
-                QApplication.processEvents() 
-                
-                master_array = np.vstack(self.tracking_buffer)
-                header_str = "Time_s,Z_mm,R_mm,Vz_m_s,Vr_m_s,Energy_eV,Particle_Type_ID"
-                np.savetxt(file_name, master_array, delimiter=",", header=header_str, comments='', fmt='%.5e')
-                
-                self.lbl_status.setText(f'Export Complete! ({len(master_array)} rows)')
-                QMessageBox.information(self, "Success", f"Exported {len(master_array)} particle states to {file_name}")
-            except Exception as e:
-                QMessageBox.critical(self, "Export Error", f"Failed to write file:\n{str(e)}")
-
-    def _qimage_to_pil(self, qimg):
-        """QImage -> PIL RGB Image. Tries a fast raw-bits path first, then
-        falls back to an in-memory PNG round-trip if PyQt5's sip.voidptr
-        reports an unknown size (known quirk on some 5.15+ builds)."""
-        from PyQt5.QtGui import QImage
-        from PIL import Image
-
-        qimg = qimg.convertToFormat(QImage.Format_RGBA8888)
-        w, h = qimg.width(), qimg.height()
-        size = qimg.sizeInBytes() if hasattr(qimg, 'sizeInBytes') else qimg.byteCount()
-
-        # Fast path: direct bits() with setsize + asstring.
-        try:
-            ptr = qimg.constBits()
-            ptr.setsize(size)
-            data = ptr.asstring(size)
-            arr = np.frombuffer(data, dtype=np.uint8)
-            if arr.size >= h * w * 4:
-                return Image.fromarray(
-                    arr[: h * w * 4].reshape(h, w, 4)[..., :3].copy(), 'RGB'
-                )
-        except Exception:
-            pass
-
-        # Bulletproof fallback: round-trip through an in-memory PNG.
-        # ~5-20× slower per frame but works on every PyQt5 build.
-        from PyQt5.QtCore import QBuffer, QIODevice
-        import io
-        buf = QBuffer()
-        buf.open(QIODevice.ReadWrite)
-        qimg.save(buf, 'PNG')
-        return Image.open(io.BytesIO(bytes(buf.data()))).convert('RGB')
+                data = np.vstack(self.tracking_buffer)
+                with open(alt, 'w', newline='', encoding='utf-8') as f:
+                    writer = csv.writer(f)
+                    writer.writerow(header)
+                    writer.writerows(data.tolist())
+                QMessageBox.information(self, "Saved to Home",
+                    f"Permission denied at original path.\nSaved to:\n{alt}")
+            except Exception as e2:
+                QMessageBox.critical(self, "Export Error", f"Failed to export particle data:\n{e2}")
+        except Exception as e:
+            self.lbl_status.setText("Particle export failed.")
+            QMessageBox.critical(self, "Export Error", f"Failed to export particle data:\n{e}")
+        finally:
+            if 'progress' in locals():
+                progress.close()
+            self.sim_isRunning = was_running
 
     def save_gif(self):
-        if not self.recorded_frames:
-            QMessageBox.warning(self, "Error", "No frames recorded!")
+        if len(self.recorded_frames) == 0:
+            QMessageBox.warning(self, "No Frames", "No recorded frames to save.")
             return
 
-        # Pause the sim BEFORE opening any modal dialog, otherwise the sim
-        # timer keeps firing sim.step() during the dialog's modal loop and
-        # starves it of events — the dialog then appears to hang when the
-        # user navigates directories.
+        suggested = os.path.join(_safe_start_dir(), time.strftime("pybemcs_%Y%m%d_%H%M%S.gif"))
+        file_name, _ = QFileDialog.getSaveFileName(self, "Save Animation", suggested, "GIF Files (*.gif)")
+        if not file_name:
+            return
+
         was_running = self.sim_isRunning
         self.sim_isRunning = False
 
-        try:
-            # DontUseNativeDialog avoids GTK/KDE's native picker (which can
-            # hang on Wayland/XCB); DontResolveSymlinks avoids slow FUSE/snap
-            # stat() calls when the user browses ~; the default filename +
-            # starting directory mean you rarely need to navigate at all.
-            suggested = os.path.join(
-                _safe_start_dir(),
-                time.strftime("pybemcs_%Y%m%d_%H%M%S.gif"),
-            )
-            file_name, _ = QFileDialog.getSaveFileName(
-                self, "Save Animation", suggested, "GIF Files (*.gif)",
-                options=QFileDialog.DontUseNativeDialog | QFileDialog.DontResolveSymlinks,
-            )
-            if not file_name:
-                return
+        total = len(self.recorded_frames)
+        # Total steps: total frames + 1 finalize/write step
+        progress = self._create_progress_dialog("Saving GIF Animation", "Preparing GIF export...", total + 1)
+        cancelled = False
 
+        try:
             try:
-                from PIL import Image  # noqa: F401
+                from PIL import Image
             except ImportError:
+                progress.close()
                 QMessageBox.warning(self, "Error", "Install Pillow: pip install Pillow")
                 return
 
-            total = len(self.recorded_frames)
+            palettized_frames = []
+            for i, qpix in enumerate(self.recorded_frames):
+                if progress.wasCanceled():
+                    cancelled = True
+                    break
 
-            try:
-                pil_images = []
-                for i, qimg in enumerate(self.recorded_frames):
-                    pil_images.append(self._qimage_to_pil(qimg))
-                    if i % 10 == 0 or i == total - 1:
-                        self.lbl_status.setText(f"Converting frame {i + 1}/{total}...")
-                        QApplication.processEvents()
+                qimg = qpix.toImage().convertToFormat(QImage.Format_RGBA8888)
+                width = qimg.width()
+                height = qimg.height()
+                ptr = qimg.bits()
+                ptr.setsize(qimg.byteCount())
+                arr = np.array(ptr, dtype=np.uint8).reshape(height, width, 4)
+                im = Image.fromarray(arr[:, :, :3])
+                # Pre-quantize frame to 256-color palette for 20x faster, smooth export
+                palettized_frames.append(im.quantize(colors=256, method=Image.Quantize.FASTOCTREE))
 
-                self.lbl_status.setText(f"Writing {total}-frame GIF...")
+                pct = int(((i + 1) / (total + 1)) * 100)
+                progress.setValue(i + 1)
+                progress.setLabelText(f"Processing frame {i+1} of {total} ({pct}%)...")
+                self.lbl_status.setText(f"Saving GIF: {i+1}/{total} ({pct}%)...")
                 QApplication.processEvents()
-                pil_images[0].save(
+
+            if not cancelled and palettized_frames:
+                progress.setLabelText("Finalizing & writing GIF to disk (98%)...")
+                QApplication.processEvents()
+
+                palettized_frames[0].save(
                     file_name,
                     save_all=True,
-                    append_images=pil_images[1:],
+                    append_images=palettized_frames[1:],
                     duration=50,
                     loop=0,
                     optimize=False,
                 )
 
+                progress.setValue(total + 1)
+                progress.setLabelText("Export completed (100%)")
+                QApplication.processEvents()
+
+            if cancelled:
+                if os.path.exists(file_name):
+                    try:
+                        os.remove(file_name)
+                    except Exception:
+                        pass
+                self.lbl_status.setText("GIF export cancelled.")
+                QMessageBox.information(self, "Cancelled", "GIF export was cancelled.")
+            else:
                 self.recorded_frames.clear()
                 self.chk_record.setChecked(False)
-                self.chk_record.setText('Record Frames (0)')
+                self.chk_record.setText("Record Frames (0)")
                 self.lbl_status.setText(f"GIF saved: {file_name}")
                 QMessageBox.information(self, "Success", f"GIF saved to:\n{file_name}")
-            except Exception as exc:
-                self.lbl_status.setText("GIF save failed.")
-                QMessageBox.critical(self, "Error", f"GIF save failed:\n{exc}")
+        except Exception as e:
+            self.lbl_status.setText("GIF save failed.")
+            QMessageBox.critical(self, "Error", f"GIF save failed:\n{e}")
         finally:
+            progress.close()
             self.sim_isRunning = was_running
 
-if __name__ == '__main__':
+    # ------------------------------------------------------------------
+    # Build standalone .exe via PyInstaller
+    # ------------------------------------------------------------------
+    def build_exe(self):
+        """Compile main.py into a standalone executable using PyInstaller.
+
+        The user selects the destination folder; a progress dialog with live
+        log output is shown while the build runs in a background thread.
+        """
+        # 1. Confirm PyInstaller is reachable
+        try:
+            import PyInstaller  # noqa: F401  (just a presence check)
+        except ImportError:
+            QMessageBox.critical(
+                self, "PyInstaller Not Found",
+                "PyInstaller is not installed in the current Python environment.\n"
+                "Install it with:\n\n    pip install pyinstaller"
+            )
+            return
+
+        # 2. Pick destination folder
+        dest_dir = QFileDialog.getExistingDirectory(
+            self,
+            "Select Destination Folder for .exe",
+            _safe_start_dir(),
+            QFileDialog.ShowDirsOnly | QFileDialog.DontResolveSymlinks,
+        )
+        if not dest_dir:
+            return
+
+        # 3. Resolve script path
+        script_path = os.path.abspath(
+            getattr(sys, "frozen", None) and sys.executable
+            or __file__
+        )
+        if not os.path.isfile(script_path) or not script_path.endswith(".py"):
+            # Fallback: look for main.py next to the current script
+            script_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "main.py")
+        if not os.path.isfile(script_path):
+            QMessageBox.critical(self, "Error", f"Cannot find main.py:\n{script_path}")
+            return
+
+        # 4. Build progress dialog
+        progress = QProgressDialog(
+            "Initialising PyInstaller…", "Cancel", 0, 100, self
+        )
+        progress.setWindowTitle("Building .exe")
+        progress.setWindowModality(Qt.WindowModal)
+        progress.setMinimumDuration(0)
+        progress.setMinimumWidth(550)
+        progress.setAutoClose(False)
+        progress.setAutoReset(False)
+        progress.setValue(0)
+        progress.show()
+        QApplication.processEvents()
+
+        # Keep a log for post-mortem inspection
+        self._build_log_lines = []
+
+        # 5. Start worker thread
+        worker = PyInstallerWorker(script_path, dest_dir, parent=self)
+        self._build_worker = worker   # keep alive while thread runs
+
+        def _on_line(line):
+            self._build_log_lines.append(line)
+            # Show last meaningful (non-empty) line in the dialog label
+            stripped = line.strip()
+            if stripped:
+                # Truncate very long lines so they fit in the dialog
+                display = stripped if len(stripped) <= 80 else stripped[:77] + "…"
+                progress.setLabelText(display)
+            QApplication.processEvents()
+
+        def _on_pct(pct):
+            if not progress.wasCanceled():
+                progress.setValue(pct)
+            QApplication.processEvents()
+
+        def _on_finished(success, message):
+            progress.setValue(100)
+            progress.close()
+            if success:
+                self.lbl_status.setText(f"Build complete → {message}")
+                QMessageBox.information(
+                    self, "Build Successful",
+                    f"Executable created successfully:\n\n{message}\n\n"
+                    "config.json has been copied alongside the .exe (if present)."
+                )
+            else:
+                self.lbl_status.setText("Build failed.")
+                log_snippet = "\n".join(self._build_log_lines[-20:])
+                QMessageBox.critical(
+                    self, "Build Failed",
+                    f"{message}\n\n--- Last build output ---\n{log_snippet}"
+                )
+
+        def _on_cancel():
+            if worker.isRunning():
+                worker.terminate()
+                worker.wait(2000)
+                self.lbl_status.setText("Build cancelled.")
+
+        worker.progress_line.connect(_on_line)
+        worker.progress_pct.connect(_on_pct)
+        worker.finished.connect(_on_finished)
+        progress.canceled.connect(_on_cancel)
+
+        worker.start()
+
+
+if __name__ == "__main__":
     app = QApplication(sys.argv)
-    app.setStyle('Fusion') 
+    app.setStyle("Fusion")
     window = DigitalTwinApp()
+
+    if len(sys.argv) > 1:
+        cfg = load_json_config(sys.argv[1])
+        if cfg is not None:
+            try:
+                window.apply_config(cfg)
+                window.lbl_status.setText(f"Loaded config: {sys.argv[1]}")
+            except Exception as e:
+                QMessageBox.critical(window, "Config Error", f"Failed to load config:\n{e}")
+        else:
+            QMessageBox.warning(window, "File Not Found",
+                                f"Config file not found:\n{sys.argv[1]}")
+
     window.show()
     sys.exit(app.exec_())

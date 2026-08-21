@@ -103,6 +103,7 @@ function DigitalTwin_Optimized()
             % 1. Inject Primaries
             num_inject = 30; 
             new_y = linspace(0.05, ui_RadS.Value - 0.1, num_inject)' + (rand(num_inject,1)-0.5)*0.05;
+            %newy = Ly * rand(numinject,1);     % uniform in [0, Ly]
             new_x = repmat(0.1, num_inject, 1);
             
             v_bohm = sqrt(2 * sim.q * 50 / sim.m_XE); 
