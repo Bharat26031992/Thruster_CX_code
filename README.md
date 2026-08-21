@@ -7,33 +7,104 @@
 </h1>
 
 <p align="center">
-  <strong>A simulation tool for ion beam extraction, charge-exchange (CEX) physics, ion optics erosion, and multiphysics studies in ion thrusters, NBI, and Ion sources.</strong>
+  <strong>A high-fidelity 2D3V electrostatic Particle-in-Cell (PIC) & Monte Carlo Collision (MCC) simulation suite for gridded ion thrusters, neutral beam injectors (NBI), and advanced plasma extraction systems.</strong>
+</p>
+
+<p align="center">
+  <a href="#-repository-overview">Repository Overview</a> •
+  <a href="#-key-features--capabilities">Key Features</a> •
+  <a href="#-numerical-controls--physics-validation">Physics Controls</a> •
+  <a href="#-py-bemcs-demos">Demos</a> •
+  <a href="#-installation--setup">Installation</a> •
+  <a href="#-usage-workflows">Usage</a> •
+  <a href="#-configuration-guide-configjson">Configuration</a> •
+  <a href="#-multi-core-benchmarks">Benchmarks</a> •
+  <a href="#-credits--authorship">Credits</a> •
+  <a href="#-license--citation">Citation</a>
 </p>
 
 ---
-## Repository Overview
 
-This repository currently includes:
+## 📁 Repository Overview
 
-- **Plume MCC Simulator (`charge_exchange_code.m`)**
-  - MATLAB model for CEX ion production, plume expansion, and downstream behavior with a custom Faraday probe for measuring CX flux.
-- **Matlab Beam extraction model EOL (`TransientDigitalTwin.m`)**
+This repository includes a comprehensive multi-tier simulation ecosystem:
+
+- **Python Digital Twin (Latest Modular Implementation — Version 2.0)**
+  - **GUI Application (`Python/main.py`):** Interactive PyQt5 desktop suite featuring live plasma visualization, multi-grid optics geometry editor, RF co-extraction controls, IEDF/EEDF diagnostics, cross-section manager, and an in-app PyInstaller `.exe` compiler.
+  - **Physics Engine (`Python/physics_engine.py`):** High-performance `DigitalTwinSimulator` featuring a dual-kernel architecture (Taichi GPU acceleration + pure-NumPy CPU fallback), 2D3V Boris particle pusher, SuperLU/CuPy Poisson solver, in-situ sputter erosion, thermal conduction, and automated numerical validation checks.
+  - **Headless Batch Runner (`Python/run_simulation_from_config.py`):** Cluster- and CLI-friendly headless runner reading configuration from `Python/config.json`.
+  - **Multi-Core Benchmarking Suite (`Python/benchmarks/`):** Parallel sweep scripts for CEX erosion rates, Electron Backstreaming (EBS) limits, primary beam grid impingement, and perveance-divergence curves.
+  - **Documentation & User Manual (`Python/docs/`):** Complete LaTeX reference manual (`PY-BEMCS_Manual.tex`) and compiled PDF guide (`PY-BEMCS_Manual.pdf`).
+- **Legacy Python Single-File App (`Python/transient_digital_twin.py`)**
+  - Standalone monolithic GUI reference implementation.
+- **Plume MCC Simulator (`Matlab/charge_exchange_code.m`)**
+  - MATLAB model for CEX ion production, plume expansion, and downstream behavior with a custom Faraday probe model.
+- **MATLAB Beam Extraction Model EOL (`Matlab/TransientDigitalTwin.m`)**
   - MATLAB test model for accelerated life testing, sputter erosion, and structural failure of accelerator grids.
-- **Python Digital Twin (latest modular implementation)**
-  - **GUI app:** `Python/main.py`
-  - **Physics backend:** `Python/physics_engine.py`
-  - **Headless runner:** `Python/run_simulation_from_config.py` (reads `config.ini`)
-- **Legacy Python single-file app:** `Python/transient_digital_twin.py`
 - **C++ 3D PIC Framework (`Cpp3D/`)**
-  - Full 3D C++ Particle-In-Cell simulation with Qt6 GUI, VTK visualization, and OpenCASCADE STEP import.
-  - Boris pusher, CG Poisson solver, CEX collisions, sputtering/erosion, thermal model, and SEE.
-  - See [`Cpp3D/README.md`](Cpp3D/README.md) for build instructions and details (This part is still under development).
+  - Full 3D Particle-In-Cell simulation with Qt6 GUI, VTK visualization, and OpenCASCADE STEP CAD import (under active development; see [`Cpp3D/README.md`](Cpp3D/README.md)).
+
 ---
 
-## PY-BEMCS Demo
+## 🌟 Key Features & Capabilities
+
+### ⚡ Dual-Kernel Hardware Acceleration
+- **Taichi GPU Acceleration:** Particle pusher (2D3V Boris algorithm), bilinear charge density deposition, and 2D thermal conduction run natively on GPU via Taichi (supporting Vulkan, CUDA, and Metal backends).
+- **Vectorized CPU Fallback:** Seamless, pure-NumPy CPU fallback kernels ensure 100% functionality on CPU-only machines or within frozen executable bundles.
+- **Sparse Poisson Field Solvers:** High-performance direct Poisson solving via SciPy SuperLU with optional GPU-accelerated CuPy sparse LU support.
+
+### 🔬 Advanced Core Physics
+- **Self-Consistent Beam Extraction:** Meniscus formation governed by upstream Bohm velocity criterion and sheath thermodynamics.
+- **Artificial Electron Mass Approximation:** Accelerated multi-scale time-stepping ($m_e = M_{\mathrm{ion}} / 100\dots 1000$).
+- **Charge-Exchange (CEX) Collisions:** Monte Carlo collision modeling with probabilistic scattering (Birdsall/Roy model) and customizable cross-section data tables.
+- **In-Situ Dynamic Sputter Erosion:** Real-time grid mass removal and hole geometry enlargement driven by primary and CEX ion impacts.
+- **Thermo-Mechanical Cantilever Grid Deflection:** Dynamic aperture distortion based on Euler–Bernoulli cantilever thermal expansion ($\delta = \frac{\alpha \Delta T L^2}{2t}$), with live mesh updating and Poisson refactorization.
+- **RF Co-Extraction:** Modulated RF extraction potentials ($V_{\mathrm{RF}}\sin(2\pi f t)$) for simultaneous or alternating electron-ion beam extraction.
+- **Neutralizer Electron Injection:** Configurable downstream electron injection rate and electron thermal temperature.
+- **Arbitrary $N$-Grid Ion Optics:** Fully customizable multi-grid systems (Screen, Accel, Decel, Ground) with per-grid thickness, gap, aperture radius, chamfer angle, and DC potential.
+- **Configurable Particle Injection Cutoff:** Option to specify finite injection windows (`inj_time_us`) for pulse extraction or decay studies.
+
+### 📊 Live Diagnostics, Telemetry & GUI Tools
+- **Live Visualizations:** Real-time ion/electron trajectory tracking, grid temperature heatmaps, sputter damage maps, and radial accelerator grid erosion groove profiles.
+- **95th-Percentile Beam Divergence ($\theta_{95}$):** Continuous tracking of beam envelope divergence.
+- **Saddle-Point Potential & EBS Monitoring:** Centerline saddle-point potential tracking to detect Electron Backstreaming risk barriers ($V_{\mathrm{saddle}} \le -5\,\text{V}$).
+- **Energy Distribution Function Viewer (IEDF / EEDF):** Dedicated diagnostic window to inspect ion and electron energy spectra.
+- **Cross-Section Manager:** Visual log-log cubic spline fitting and interpolation for custom Charge Exchange (CX), Secondary Electron Emission (SEE), and gas mixture interaction data.
+- **Material Preset Library:** Built-in properties for Molybdenum, SS316 Stainless Steel, Titanium, and Graphite, with fully customizable thermal and sputtering coefficients.
+- **Configurable Ion Species:** Mass (amu) and charge state presets (Xe, Kr, Ar, N2, O2, H2, He, Hg, Cs) or custom user-defined ions.
+- **In-App Standalone Executable Builder:** Build single-file `.exe` packages directly from the menu (**Settings → Build .exe...**) using non-blocking background threads (`QThread`) with live progress milestone reporting.
+- **Asynchronous Data Exports:** Export telemetry logs to CSV, full particle kinematics ($x, y, v_x, v_y, v_z, E$) to CSV, and multi-frame GIF recordings with live frame counters.
+
+---
+
+## 🔬 Numerical Controls & Physics Validation
+
+When generating the simulation domain (`build_domain`), the physics engine automatically verifies the numerical and physical consistency of your grid resolution and time step:
+
+1. **Debye Length Resolution ($\lambda_{\mathrm{D}}$)**:
+   $$\lambda_{\mathrm{D}} = \sqrt{\frac{\varepsilon_0 T_{\mathrm{e,up}}}{e \cdot (0.61 n_0)}}, \qquad \Delta x \le \lambda_{\mathrm{D}} \quad \text{and} \quad \Delta y \le \lambda_{\mathrm{D}}$$
+   Prevents unphysical numerical grid heating and non-physical space-charge oscillations.
+
+2. **Plasma Frequency Integration Limit**:
+   $$\omega_{\mathrm{pi}} = \sqrt{\frac{n_0 e^2}{m_{\mathrm{ion}} \varepsilon_0}}, \qquad \Delta t \le \frac{2\pi}{\omega_{\mathrm{pi}}}$$
+   Ensures the temporal resolution captures collective plasma oscillations.
+
+3. **Courant–Friedrichs–Lewy (CFL) Velocity Bound**:
+   $$v_{\max} = v_{\mathrm{Bohm}} + 4 v_{\mathrm{thermal,i}} = \sqrt{\frac{Z e T_{\mathrm{e}}}{m_{\mathrm{ion}}}} + 4\sqrt{\frac{Z e T_{\mathrm{i}}}{m_{\mathrm{ion}}}}, \qquad \frac{\Delta x}{\Delta t} \ge v_{\max}, \quad \frac{\Delta y}{\Delta t} \ge v_{\max}$$
+   Guarantees that particles do not traverse more than one mesh cell per time increment.
+
+4. **Dynamic Domain & Geometry Modes**:
+   - **Axial Domain Length:** $L_x = 1.5\,\text{mm} + \sum_k (t_k + g_k) + 3.0\,\text{mm}$ automatically computed from the grid geometry.
+   - **`half_hole`:** Axisymmetric half-aperture with specular symmetry reflection at $y = 0$ (default, fastest).
+   - **`one_hole`:** Full single-aperture extraction domain with periodic boundary conditions along $y$.
+   - **`two_holes`:** Dual-aperture coupling domain with periodic boundary conditions along $y$.
+
+---
+
+## 🎬 PY-BEMCS Demos
 
 <p align="center">
-  <i>This simulation demonstrates Xe+ beam extraction of a dual-grid ion optics system for Vscreen=1650V and Va=-350V ,n_plasma=1e16/m3 without a neutralizer. As the primary and the CEX ions erode the screen/accelerator grid, geometry and potential barriers evolve in time. The secondary electrons are emitted due to the impact of primary beam ions and the charge exchange ions on the grids.</i>
+  <i>Simulation demonstrating Xe+ beam extraction in a dual-grid ion optics system (Vscreen=1650V, Vaccel=-350V, n_plasma=1e16 m⁻³) without a neutralizer. Geometry and potential barriers dynamically evolve as primary and CEX ions erode the grids.</i>
 </p>
 
 <p align="center">
@@ -42,8 +113,9 @@ This repository currently includes:
 </p>
 
 ---
+
 <p align="center">
-  <i>Example of RF-based co-extraction of electrons and ions (me=mXe/100) .</i>
+  <i>RF-based co-extraction of electrons and ions (m_e = m_Xe / 100).</i>
 </p>
 
 <p align="center">
@@ -54,216 +126,204 @@ This repository currently includes:
 ---
 
 <p align="center">
-  <i>Space charge neutralization of the ion beam at Vs=800V and Va=600V for different electron injection rates.</i>
+  <i>Space charge neutralization of an ion beam (Vs=800V, Va=-600V) under various electron injection rates.</i>
 </p>
 
 <p align="center">
   <video src="https://github.com/user-attachments/assets/f541d3a0-647e-4827-9dda-5e4ce4f7e235" width="500px" autoplay loop muted playsinline>
   </video>
 </p>
+
 ---
 
-### Core Physics
+## 🛠️ Grid Material Properties
 
-- **Vectorized particle updates** for high-throughput runtime performance.
-- **Artificial electron mass approximation (m_e = M_ion/1000)** to speed up the simulation time.
-- **Self-consistent beam extraction** from plasma meniscus and Bohm criteria.
-- **CEX collision modeling** with probabilistic scattering (Birdsall/Roy plume model), or user-imported cross-section data.
-- **Dynamic erosion and failure logic** due to CEX ions with in-situ remeshing behavior.
-- **RF-based Coextraction** of electron and ion beam.
-- **User-defined multi-grid beam extraction** for different kinds of sources.
+Users can select built-in presets or configure custom thermophysical and sputtering properties:
 
-### Configurable Ion Beam Species (Menubar: Beam > Ion Species)
-- Define the beam ion by **atomic/molecular mass** (amu) and **charge state** (+1, +2, etc.).
-- Built-in presets for common species: Xe, Kr, Ar, N2, O2, H2, He, Hg, Cs.
-- Custom mass and charge for any user-defined ion.
+| Material | $k$ (W/m·K) | $\rho$ (kg/m³) | $c_p$ (J/kg·K) | $\alpha$ (10⁻⁶/K) | $E$ (GPa) | $Y_{\mathrm{coeff}}$ | $E_{\mathrm{th}}$ (eV) |
+|---|---|---|---|---|---|---|---|
+| **Molybdenum** | 138.0 | 10 280 | 250 | 4.8 | 329 | 1.05e-4 | 30.0 |
+| **Steel (SS316)** | 16.3 | 8 000 | 500 | 16.0 | 193 | 2.80e-4 | 25.0 |
+| **Titanium** | 21.9 | 4 507 | 520 | 8.6 | 116 | 1.80e-4 | 20.0 |
+| **Graphite** | 120.0 | 2 200 | 710 | 3.0 | 11 | 3.50e-4 | 15.0 |
 
-### Cross-Section Data Import (Menubar: Beam > Cross-Section Manager)
-- Import CSV tables of **Energy (eV) vs Cross-Section (m^2)** for different reaction channels:
-  - Charge Exchange (CX)
-  - Secondary Electron Yield (SEE)
-  - Custom reactions (e.g., air-mixture gas interactions)
-- **Visualise** imported data on a log-log plot.
-- **Fit a cubic spline** (in log-log space) with adjustable smoothing so that intermediate energy values are interpolated during the simulation.
-- Multiple datasets can be loaded, inspected, and removed.
-- When a fitted CX or SEE spline is present it automatically replaces the built-in analytical model during the run.
-
-### Grid Material Selection (Menubar: Materials > Grid Material)
-- Choose from built-in presets or define fully custom properties:
-
-| Material | k (W/m/K) | rho (kg/m^3) | cp (J/kg/K) | alpha (1/K) | E (GPa) |
-|---|---|---|---|---|---|
-| Molybdenum | 138 | 10 280 | 250 | 4.8e-6 | 329 |
-| Steel (SS316) | 16.3 | 8 000 | 500 | 16.0e-6 | 193 |
-| Titanium | 21.9 | 4 507 | 520 | 8.6e-6 | 116 |
-| Graphite | 120 | 2 200 | 710 | 3.0e-6 | 11 |
-
-- Configurable parameters: thermal conductivity, density, specific heat, emissivity, thermal expansion coefficient, Young's modulus, sputter yield coefficient, and sputter threshold energy.
-
-### Cantilever Thermal Deformation
-- Grids deform like a **cantilever beam**: clamped at the top wall (`Y = Ly`), free at the aperture edge (`Y = r`).
-- Tip deflection driven by thermal stress: `delta = alpha * dT * L^2 / (2*t)`.
-- Quadratic (Euler-Bernoulli) deflection profile applied to the grid boundary mask, producing visible bowing in the beam trajectory plot.
-- Materials with high thermal expansion and low conductivity (e.g., Steel) exhibit significantly faster deformation than refractory metals (e.g., Mo).
-
-### Python Multiphysics Additions
-- **Poisson field update with space charge** using both ion and electron density contributions.
-- **Neutralizer electron model** with configurable electron injection rate and electron temperature.
-- **Thermal-erosion coupling** with simulation modes:
-  - `Both`
-  - `Thermal`
-  - `Erosion`
-- **Thermal monitoring** for screen and accelerator grids.
-
-### Visualization and Data Export
-
-- Live plasma and damage-map plots.
-- Electron backstreaming and beam divergence telemetry.
-- Grid temperature map visualization.
-- CSV export (iteration, electron backstreaming potential, divergence, grid temperatures).
-- Particle kinematics export (time, position, velocity, energy, particle type).
-- GIF recording/export via Pillow.
-
-### Hardware Acceleration
-
-- **Taichi backend (GPU-ready)**: particle push (Boris), charge-density
-  deposition, and 2D thermal conduction compile through Taichi. On
-  machines with a CUDA/Metal/Vulkan GPU the kernels run on the GPU in
-  32-bit precision; on CPU-only machines they run in 64-bit. Toggle the
-  three commented lines at the top of `Python/physics_engine.py` to
-  switch between `ti.gpu` (f32) and `ti.cpu` (f64).
-- **Poisson solver**: runs on the CPU by default (SciPy SuperLU). An
-  optional CuPy GPU path exists but is disabled by default — CuPy's
-  sparse LU has too much kernel-launch overhead for small grids (~30k
-  unknowns) and SciPy wins. Flip `_USE_GPU_POISSON = True` in
-  `Python/physics_engine.py` to experiment on larger grids.
-- **Smooth GUI under long runs**: matplotlib plots refresh every 20
-  physics steps using reusable `pcolormesh` artists, `canvas.draw_idle()`
-  for coalesced repaints, and `QApplication.processEvents()` between
-  physics steps so the Qt event loop never starves during heavy runs.
 ---
 
-## Installation and Usage
+## 🚀 Installation & Setup
 
-### MATLAB Workflow
+### Python Workflow (Recommended)
 
-1. Prerequisite: MATLAB R2015b or newer.
-2. Open MATLAB in the repository root.
-3. Run:
-
-```matlab
-TransientDigitalTwin  % Grid erosion and EOL study
-charge_exchange_code  % Plume/CEX study
-```
-
-### Python Workflow (Recommended, Modular)
-
-#### 1. Create and activate a virtual environment
-
-Python 3.10+ is required (3.12 recommended). From the repository root:
+#### 1. Create and Activate Virtual Environment
+Python 3.10+ is required (Python 3.12 recommended).
 
 ```bash
+# Navigate to the repository root
+cd PY-BEMCS
+
 # Linux / macOS
 python3 -m venv Python/.venv
 source Python/.venv/bin/activate
 
 # Windows (PowerShell)
-py -3 -m venv Python\.venv
+python -m venv Python\.venv
 Python\.venv\Scripts\Activate.ps1
 ```
 
-Upgrade `pip` inside the venv before installing:
-
+#### 2. Install Dependencies
 ```bash
 pip install --upgrade pip
+pip install numpy scipy matplotlib PyQt5 Pillow taichi pyinstaller
 ```
 
-#### 2. Install core dependencies
-
+*(Optional for GPU Poisson)*: On Linux with NVIDIA CUDA 12:
 ```bash
-pip install numpy scipy matplotlib PyQt5 Pillow taichi
+pip install 'cupy-cuda12x<14' nvidia-cublas-cu12 nvidia-cusparse-cu12 nvidia-cusolver-cu12 nvidia-cuda-runtime-cu12
 ```
 
-Taichi auto-selects a GPU backend (CUDA / Metal / Vulkan) at startup if
-one is available. Nothing else to configure.
+---
 
-#### 3. (Optional) Install CuPy for GPU Poisson
+## 💻 Usage Workflows
 
-Only needed if you plan to experiment with the CuPy-based Poisson
-solver on **very large grids**. The code runs fine without it. On
-Linux with an NVIDIA GPU and a recent driver:
-
-```bash
-pip install 'cupy-cuda12x<14' \
-  nvidia-cublas-cu12 nvidia-cusparse-cu12 nvidia-cusolver-cu12 \
-  nvidia-cuda-runtime-cu12 nvidia-cuda-nvrtc-cu12 \
-  nvidia-nvjitlink-cu12 nvidia-curand-cu12 nvidia-cufft-cu12
-```
-
-`main.py` self-heals `LD_LIBRARY_PATH` so the bundled NVIDIA wheels are
-discovered automatically — no need to set it manually. To actually turn
-on the GPU Poisson solver, edit `Python/physics_engine.py` and set
-`_USE_GPU_POISSON = True` (it is `False` by default).
-
-#### 4. Launch the GUI app
-
+### 1. Interactive Graphical Application (GUI)
+Launch the primary PyQt5 GUI interface:
 ```bash
 python Python/main.py
 ```
+- **Hot-Reload Configurations:** Switch simulation parameters on the fly via **Settings → Open Config JSON...** or **Settings → Reload config.json**.
+- **Build Standalone Executable:** Click **Settings → Build .exe...**, choose an output path, and track compilation.
+- **Diagnostics & Windows:** Inspect energy spectra via **Show Energy Dist. (IEDF/EEDF)**, manage materials in **Materials → Grid Material...**, and inspect cross-sections in **Beam → Cross-Section Manager...**.
 
-> **Qt + OpenFOAM users:** If your shell sources OpenFOAM (or any toolchain
-> that injects `/usr/lib/x86_64-linux-gnu` into `LD_LIBRARY_PATH`), the system
-> Qt libraries can shadow PyQt5's bundled copies and cause
-> `Could not load the Qt platform plugin "xcb"`. `main.py` now self-heals by
-> prepending the PyQt5 wheel's own `Qt5/lib` directory (and any bundled
-> NVIDIA CUDA wheel `lib/` folders) to `LD_LIBRARY_PATH` and re-exec-ing
-> once; a shell-level equivalent is also provided as `Python/run.sh`.
-
-#### 5. Or run headless from a configuration file
-
+### 2. Headless Batch Execution via `config.json`
+Run high-throughput simulations on remote clusters or headless servers:
 ```bash
 python Python/run_simulation_from_config.py
 ```
 
-Edit `Python/config.ini` to set beam species, grid material, cross-section file paths, grid geometry, plasma parameters, and terminal output options.
-
-### Python Workflow (Legacy Single File)
-
+### 3. Parallel Multi-Core Benchmarking Sweeps
+Execute parametric physics sweeps (each grid gap or operating point runs on an independent core):
 ```bash
-python Python/TrainsientDigitalTwin.py
+python Python/benchmarks/benchmark_cex.py
+python Python/benchmarks/benchmark_ebs.py
+python Python/benchmarks/benchmark_impingement.py
+python Python/benchmarks/benchmark_perveance.py
+python Python/benchmarks/benchmark_perveance_Vs_Sweep.py
 ```
 
-## License
+### 4. MATLAB Workflow
+Prerequisite: MATLAB R2015b or newer. Open MATLAB in `Matlab/` and run:
+```matlab
+TransientDigitalTwin   % Accelerated grid erosion and EOL study
+charge_exchange_code   % Plume expansion & CEX study
+```
+
+---
+
+## ⚙️ Configuration Guide (`config.json`)
+
+Simulations are configured via `Python/config.json`:
+
+```json
+{
+  "beam_species": {
+    "mass_amu": 131.293,
+    "charge_state": 1
+  },
+  "grid_material": {
+    "preset": "Molybdenum"
+  },
+  "advanced_settings": {
+    "neut_x": 19.9,
+    "neut_r": 3.0,
+    "V_plasma_offset": 1000.0,
+    "m_e_ratio": 1000.0,
+    "Lx": 20.0,
+    "Ly": 3.0
+  },
+  "simulation": {
+    "n0_plasma": 7.73e17,
+    "Te_up": 8.5,
+    "Ti": 0.034,
+    "Tn": 400.0,
+    "n0": 5.27e18,
+    "Accel": 0.5,
+    "Thresh": 10000.0,
+    "sim_mode": "Thermal",
+    "geometry": "half_hole"
+  },
+  "rf_co_extraction": {
+    "rf_enable": false,
+    "rf_grid_idx": 0,
+    "rf_freq": 13.56,
+    "rf_amp": 500.0
+  },
+  "neutralizer": {
+    "neut_rate": 0,
+    "Te": 5.0
+  },
+  "grids": [
+    { "V": 1300.0, "t": 1.2, "gap": 0.9, "r": 1.3, "cham": 20.0 },
+    { "V": -150.0, "t": 0.6, "gap": 0.5, "r": 0.8, "cham": 0.0 },
+    { "V": 50.0,   "t": 0.5, "gap": 4.0, "r": 1.2, "cham": 0.0 }
+  ],
+  "cross_sections": {
+    "cx_file": "",
+    "see_file": "",
+    "custom_file": "",
+    "spline_smoothing": 0.0
+  },
+  "terminal_output": {
+    "grid_temperatures": true,
+    "beam_divergence": true,
+    "saddle_point_potential": true,
+    "mean_particle_energy": true,
+    "iteration_time": true
+  }
+}
+```
+
+---
+
+## 📊 Multi-Core Benchmarking Suite
+
+| Benchmark Script | Physics Parameter Swept | Objective |
+| :--- | :--- | :--- |
+| **`benchmark_cex.py`** | Neutral density ($n_{\mathrm{n}} = 10^{18}\dots 5\times 10^{19}\,\text{m}^{-3}$) | Quantify accelerator grid erosion rates from CEX ions across various grid gaps. |
+| **`benchmark_ebs.py`** | Accelerator voltage ($V_{\mathrm{a}} = -400\dots 0\,\text{V}$) | Map centerline saddle-point potential against the $-5\,\text{V}$ Electron Backstreaming threshold. |
+| **`benchmark_impingement.py`** | Plasma density / Perveance ($P = I_{\mathrm{ion}}/V_{\mathrm{tot}}^{3/2}$) | Measure primary beam interception and direct grid scraping fractions. |
+| **`benchmark_perveance.py`** | Plasma density (60 points) | Trace perveance-divergence curves identifying underfocused, optimal, and overfocused regimes. |
+| **`benchmark_perveance_Vs_Sweep.py`** | Screen voltage ($V_{\mathrm{s}} = 600\dots 2000\,\text{V}$) | Evaluate extraction voltage scaling on beam divergence at constant plasma density. |
+
+---
+
+## 👥 Credits & Authorship
+
+- **Original Creator & Lead Author:**
+  - **Dr. Bharat Singh Rawat** — [GitHub](https://github.com/Bharat26031992/PY-BEMCS) | [Email](mailto:bharat.bharat22@gmail.com)
+- **Version 2.0 Architecture, Physics Controls & Diagnostic Extensions:**
+  - **Nick Magrin** — [GitHub](https://github.com/nickmagrin-pixel/PY-BEMCS) | [Email](mailto:nick.magrin@gmail.com)
+
+---
+
+## 📄 License & Citation
 
 This project is licensed under the **Creative Commons Attribution-NonCommercial 4.0 International License (CC BY-NC 4.0)**. 
 
-This means you are free to use, share, and adapt this code for academic, research, and personal projects, provided you give appropriate credit. It **may not** be used for commercial purposes.
+You are free to use, share, and adapt this software for academic and non-commercial research, provided proper attribution is given.
 
 [![License: CC BY-NC 4.0](https://img.shields.io/badge/License-CC%20BY--NC%204.0-lightgrey.svg)](https://creativecommons.org/licenses/by-nc/4.0/)
 
-*For commercial inquiries or alternative licensing, please contact the author.*
+### Citation
 
----
-## Citation
+If you use this software in your research, please cite:
 
-If you use this software in your work, please cite it using the following formats:
-
-**Plain Text:**
-Bharat Singh Rawat. (2026). *Python Beam Extraction and Monte Carlo Simulator (PY-BEMCS)* [Source code]. GitHub. https://github.com/Bharat26031992/PY-BEMCS
-
-**BibTeX:**
 ```bibtex
 @software{PY-BEMCS,
-  author       = {Bharat Singh Rawat},
+  author       = {Bharat Singh Rawat and Nick Magrin},
   title        = {Python Beam Extraction and Monte Carlo Simulator (PY-BEMCS)},
   year         = {2026},
   publisher    = {GitHub},
   journal      = {GitHub repository},
-  howpublished = {\url{[https://github.com/Bharat26031992/PY-BEMCS](https://github.com/Bharat26031992/PY-BEMCS)}},
+  howpublished = {\url{https://github.com/nickmagrin-pixel/PY-BEMCS}},
 }
 ```
 
-## Author
-**Dr.Bharat Singh Rawat** 
-
-Feel free to reach out for collaborations or questions regarding the code on bharat.bharat22@gmail.com!
