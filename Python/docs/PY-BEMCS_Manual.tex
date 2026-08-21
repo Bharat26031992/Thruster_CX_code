@@ -22,7 +22,7 @@
     urlcolor=blue!60!black,
     citecolor=blue!60!black,
     pdftitle={PY-BEMCS Physics Reference and User Manual},
-    pdfauthor={Dr. Bharat Singh Rawat}
+    pdfauthor={Dr. Bharat Singh Rawat, Nick Magrin}
 }
 
 \pagestyle{fancy}
@@ -50,21 +50,26 @@
 % ---------------------- TITLE ----------------------
 \begin{titlepage}
 \centering
-\vspace*{2cm}
+\vspace*{1.5cm}
 
 {\Huge\bfseries Python Beam Extraction \&\\[0.3em] Monte Carlo Simulator \par}
-\vspace{0.5cm}
+\vspace{0.4cm}
 {\Large\bfseries (\PYBEMCS)\par}
 
-\vspace{1.2cm}
-{\large\textit{Comprehensive Physics Reference and User Manual}\par}
+\vspace{1.0cm}
+{\large\textit{Comprehensive Physics Reference, Numerical Controls, and User Manual}\par}
 
-\vspace{2.5cm}
+\vspace{1.8cm}
+{\large\textbf{Original Author:}\par}
 {\large Dr.~Bharat Singh Rawat\par}
-\vspace{0.2cm}
 {\normalsize \href{mailto:bharat.bharat22@gmail.com}{bharat.bharat22@gmail.com}\par}
 
-\vspace{1.5cm}
+\vspace{0.8cm}
+{\large\textbf{Version 2.0 Extended Architecture \& Physics Modifications:}\par}
+{\large Nick Magrin\par}
+{\normalsize \href{mailto:nick.magrin@gmail.com}{nick.magrin@gmail.com}\par}
+
+\vspace{1.2cm}
 {\normalsize \textbf{Version 2.0 (Extended Modular Release)}\par}
 \vspace{0.2cm}
 {\normalsize \today\par}
@@ -72,7 +77,7 @@
 \vfill
 \hrule
 \vspace{0.5em}
-{\small Open-Source 2D3V Electrostatic Particle-in-Cell, Plume MCC, Thermo-Mechanical Grid Erosion, \& Multi-Core Benchmarking Suite}
+{\small Open-Source 2D3V Electrostatic Particle-in-Cell, Plume MCC, Thermo-Mechanical Grid Erosion, Numerical Verification Controls, \& Multi-Core Benchmarking Suite}
 \end{titlepage}
 
 % ---------------------- ABSTRACT ----------------------
@@ -81,11 +86,12 @@
 \end{center}
 \vspace{0.5em}
 
-\PYBEMCS{} is an open-source 2D3V (two spatial, three velocity components) electrostatic Particle-in-Cell (PIC) and Monte Carlo Collision (MCC) simulation suite engineered for ion thruster optics, neutral beam injectors (NBI), and advanced plasma extraction systems. This document provides a complete mathematical, physical, and numerical specification of the simulator, together with comprehensive user guidelines for the graphical interface, headless batch solvers, and automated multi-core benchmarking scripts.
+\PYBEMCS{} is an open-source 2D3V (two spatial, three velocity components) electrostatic Particle-in-Cell (PIC) and Monte Carlo Collision (MCC) simulation suite engineered for ion thruster optics, neutral beam injectors (NBI), and advanced plasma extraction systems. This document provides a complete mathematical, physical, and numerical specification of the simulator, together with rigorous stability criteria, physics validation checks, and comprehensive user guidelines for the graphical interface, headless batch solvers, and automated multi-core benchmarking scripts.
 
 Key capabilities detailed in this manual include:
 \begin{itemize}[nosep]
     \item Self-consistent Bohm extraction from upstream plasma sheaths with space-charge Poisson solves and Boltzmann electron screening.
+    \item Automatic numerical physics validation controls (Debye length resolution, plasma frequency limits, CFL velocity bounds, and dynamic domain scaling).
     \item 2D3V relativistic Boris particle advancement with dual Taichi GPU/CPU accelerated and pure-NumPy fallback kernels.
     \item Charge-Exchange (CEX) collision dynamics using Roy's neutral plume model or user-imported experimental cross-section datasets with log-log cubic spline smoothing.
     \item In-situ sputter erosion modeling (Matsunami yield formulation) coupled with live grid mesh boundary deletion.
@@ -124,6 +130,59 @@ To combine peak GPU performance on workstation hardware with maximum portability
     \item \textbf{Taichi Backend (GPU/CPU)}: When Taichi is initialized, particle pushes, bilinear charge deposition, and explicit thermal conduction compile into parallel GPU kernels (CUDA, Metal, or Vulkan) running in 32-bit floating-point precision ($\texttt{ti.f32}$).
     \item \textbf{Vectorised CPU Fallback Kernels}: If Taichi is not present (or when running inside frozen executable packages), the physics engine automatically activates vectorised CPU routines (\texttt{accumulate\_rho\_cpu}, \texttt{push\_particles\_boris\_cpu}) using optimized NumPy array operations.
 \end{enumerate}
+
+% =====================================================
+\section{Rigorous Numerical Physics Controls and Stability Verification}
+% =====================================================
+
+To prevent unphysical numerical heating, artificial grid-aliasing instabilities, or phase-space skipping, the physics engine enforces strict automated validation checks during domain generation (\texttt{build\_domain}):
+
+\subsection{Debye Length Resolution Criterion}
+To prevent unphysical finite-grid self-heating, the spatial cell dimensions must resolve the upstream plasma Debye length:
+\begin{equation}
+    \lambda_{\mathrm{D}} = \sqrt{\frac{\varepsilon_0 T_{\mathrm{e,up}}}{e \cdot (0.61 n_0)}},
+\end{equation}
+where the pre-sheath factor $0.61 \approx \exp(-1/2)$ accounts for the density drop at the sheath edge. The engine strictly requires:
+\begin{equation}
+    \Delta x \le \lambda_{\mathrm{D}} \quad \text{and} \quad \Delta y \le \lambda_{\mathrm{D}}.
+\end{equation}
+If the cell spacing exceeds $\lambda_{\mathrm{D}}$, a descriptive error is raised, prompting the user to refine $\Delta x, \Delta y$ or adjust the plasma density.
+
+\subsection{Plasma Frequency and Time-Step Integration Limits}
+The time step $\Delta t$ must resolve both the ion plasma frequency $\omega_{\mathrm{pi}}$ and the scaled electron plasma frequency $\omega_{\mathrm{pe}}$:
+\begin{equation}
+    \omega_{\mathrm{pi}} = \sqrt{\frac{n_0 e^2}{m_{\mathrm{ion}} \varepsilon_0}}, \qquad
+    \omega_{\mathrm{pe}} = \sqrt{\frac{n_0 e^2}{m_{\mathrm{e}} \varepsilon_0}}.
+\end{equation}
+The maximum permissible time step is bounded by:
+\begin{equation}
+    \Delta t \le \frac{2\pi}{\omega_{\mathrm{pi}}}, \qquad \Delta t_{\mathrm{e}} \le \frac{2\pi}{\omega_{\mathrm{pe}}}.
+\end{equation}
+If $\Delta t$ violates this limit, domain initialization halts to avoid numerical divergence.
+
+\subsection{CFL and Velocity Resolution Bound}
+Particles must not travel more than one mesh cell during a single time increment. The maximum expected particle velocity at the sheath edge includes the Bohm drift and 4 standard deviations of the thermal distribution:
+\begin{equation}
+    v_{\max} = v_{\mathrm{B}} + 4 v_{\mathrm{th,i}} = \sqrt{\frac{Z e T_{\mathrm{e}}}{m_{\mathrm{ion}}}} + 4\sqrt{\frac{Z e T_{\mathrm{i}}}{m_{\mathrm{ion}}}}.
+\end{equation}
+The engine enforces the Courant--Friedrichs--Lewy (CFL) velocity resolution bound:
+\begin{equation}
+    \frac{\Delta x}{\Delta t} \ge v_{\max} \quad \text{and} \quad \frac{\Delta y}{\Delta t} \ge v_{\max}.
+\end{equation}
+
+\subsection{Dynamic Domain Sizing and Symmetry Boundary Conditions}
+The axial computational domain length $L_x$ is dynamically calculated based on the total physical grid stack:
+\begin{equation}
+    L_x = \SI{1.5}{\milli\meter} + \sum_{k=1}^{N} \left(t_k + g_k\right) + \SI{3.0}{\milli\meter},
+\end{equation}
+ensuring adequate space upstream for meniscus formation and downstream for plume expansion.
+
+The transverse domain height $L_y$ and boundary conditions adapt to the selected geometry layout:
+\begin{itemize}[nosep]
+    \item \textbf{\texttt{half\_hole}} (Default): Half-pitch axisymmetric representation with specular symmetry reflection at $y = 0$ ($L_y = 0.5 r_{\mathrm{s}} + 0.30 \cdot \text{pitch}$).
+    \item \textbf{\texttt{one\_hole}}: Full single-aperture extraction domain ($L_y = 3.0 r_{\mathrm{s}}$) with periodic boundary conditions along $y$.
+    \item \textbf{\texttt{two\_holes}}: Dual-aperture inter-hole coupling domain ($L_y = 3.0 r_{\mathrm{s}} + \text{pitch}$) with periodic boundaries in $y$.
+\end{itemize}
 
 % =====================================================
 \section{Particle-in-Cell Electrostatic Algorithm}
