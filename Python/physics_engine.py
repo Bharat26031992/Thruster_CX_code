@@ -378,6 +378,7 @@ class DigitalTwinSimulator:
         self.e_vy = np.zeros(self.max_e, dtype=_NP_FP)
         self.e_vz = np.zeros(self.max_e, dtype=_NP_FP)
         self.num_e = 0
+        self.iteration = 0
 
         self.V        = np.zeros((self.ny, self.nx), dtype=np.float64)
         self.rho      = np.zeros((self.ny, self.nx), dtype=_NP_FP)
@@ -650,8 +651,13 @@ class DigitalTwinSimulator:
             self.T_map_new  = np.full((self.ny, self.nx), 300.0, dtype=_NP_FP)
             self.Tmapnew    = self.T_map_new
             self.reset_arrays()
-            if not getattr(self, '_domain_built', False):
-                self.iteration = 0
+            self.iteration  = 0
+            self.injected_ions = 0.0
+            self.injected_ions_step = 0.0
+            self.transmitted_ions = 0.0
+            self.transmitted_ions_step = 0.0
+            self.entered_optics = 0.0
+            self.entered_optics_step = 0.0
             self._domain_built = True
 
         inj_time = params.get("inj_time", 0.0)
@@ -902,7 +908,8 @@ class DigitalTwinSimulator:
 
             v_bohm = np.sqrt(self.q_ion * Te_up / self.m_ion)
 
-            injection_area_scale = 0.01 # 0.015
+            #injection_area_scale = 0.01 # 0.015
+            injection_area_scale = 1
             injection_area = self.Ly * 1e-3 * injection_area_scale
             I_ion = self.q_ion * 0.61 * n0 * v_bohm * injection_area # 3.7-28 Goebbels
             charge_per_macro = self.q_ion * self.macro_weight
@@ -980,8 +987,10 @@ class DigitalTwinSimulator:
         # --- NEUTRALIZER ---
         num_e_neut = int(params.get('neut_rate', 30))
         Te_eV = params.get('Te', 5.0)
-        neut_x = params.get('neut_x', self.Lx - 0.1)
-        neut_r = params.get('neut_r', self.Ly)
+        neut_x_param = params.get('neut_x', self.Lx - 0.5)
+        neut_r_param = params.get('neut_r', self.Ly)
+        neut_x = float(np.clip(neut_x_param, self.dx, self.Lx - self.dx))
+        neut_r = float(np.clip(neut_r_param, self.dy, self.Ly))
         if num_e_neut > 0:
             new_ey = np.random.uniform(0.0, neut_r, num_e_neut).astype(_NP_FP)
             new_ex = np.full(num_e_neut, neut_x, dtype=_NP_FP)
