@@ -1200,7 +1200,7 @@ class DigitalTwinApp(QMainWindow):
         self.inputs["inj_time_us"].setValue(0.0)
 
         # Neutralizer
-        self.inputs["neut_rate"].setValue(0.0)
+        self.inputs["neut_rate"].setValue(30.0)
         self.inputs["Te"].setValue(2.0)
 
         # RF off
@@ -1469,7 +1469,7 @@ class DigitalTwinApp(QMainWindow):
         max_v = max(gw['V'].value() for gw in self.grid_widgets) if self.grid_widgets else 1000.0
         self.scat_prim = self.ax_live.scatter([], [], c=[], s=2, cmap='turbo', vmin=0, vmax=max_v+300, alpha=0.8)
         self.scat_cex = self.ax_live.scatter([], [], c=[], s=3, cmap='turbo', vmin=0, vmax=max_v+300, alpha=1.0)
-        self.scat_elec = self.ax_live.scatter([], [], s=1, c='#00FF00', alpha=0.5)
+        self.scat_elec = self.ax_live.scatter([], [], s=1, c='#00FF00', alpha=0.8, zorder=5)
 
         if not hasattr(self, "cax_live"):
             divider = make_axes_locatable(self.ax_live)
