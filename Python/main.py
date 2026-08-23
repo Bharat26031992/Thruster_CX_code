@@ -990,6 +990,16 @@ class DigitalTwinApp(QMainWindow):
         control_layout.addWidget(QLabel("1. MULTI-GRID OPTICS"))
         self.grids_layout = QVBoxLayout()
 
+        # Upstream gap: distance from injection wall to left face of screen grid (mm)
+        row, self.inputs["upstream_gap_mm"] = self.create_input(
+            "Upstream Gap (mm):", 0.0, 20.0, 0.1, 2
+        )
+        control_layout.addLayout(row)
+        self.inputs["upstream_gap_mm"].setToolTip(
+            "Distance from the injection wall (left boundary) to the "
+            "left face of the screen grid [mm]. Default 0.5 mm."
+        )
+        
         btn_layout = QHBoxLayout()
         btn_add = QPushButton("+ Add Grid")
         btn_rem = QPushButton("- Remove Grid")
@@ -1198,6 +1208,7 @@ class DigitalTwinApp(QMainWindow):
         self.inputs["Accel"].setValue(1.0)
         self.inputs["Thresh"].setValue(1e6)
         self.inputs["inj_time_us"].setValue(0.0)
+        self.inputs["upstream_gap_mm"].setValue(0.5)  # default: 0.5 mm upstream chamber
 
         # Neutralizer
         self.inputs["neut_rate"].setValue(30.0)
@@ -1274,6 +1285,8 @@ class DigitalTwinApp(QMainWindow):
         idx_geom = self.combo_geometry.findText(geom)
         if idx_geom >= 0:
             self.combo_geometry.setCurrentIndex(idx_geom)
+
+        self.inputs["upstream_gap_mm"].setValue(sim.get("upstream_gap_mm", 0.5))
 
         rf = config.get("rf_co_extraction", {})
         self.chk_rf.setChecked(rf["rf_enable"])
