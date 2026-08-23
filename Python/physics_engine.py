@@ -310,7 +310,7 @@ class DigitalTwinSimulator:
         self.sputter_Y_coeff = mat['Y_coeff']
         self.sputter_E_th    = mat['E_th']
 
-        self.macro_weight        = 5e5
+        self.macro_weight        = 3e5
         self.sb_sigma            = 5.67e-8
         self.thermal_accel       = 1e7
         self.injected_ions       = 0.0
@@ -573,9 +573,11 @@ class DigitalTwinSimulator:
     # ------------------------------------------------------------------
     def build_domain(self, params, preserve_state=False):
         grids   = params.get("grids", [])
+        upstream_gap = max(float(params.get('upstream_gap_mm', 0.5)), self.dx * 2)
+        self.upstream_gap_mm = upstream_gap
         if grids:
             total_grid_thickness = sum(g['t'] + g['gap'] for g in grids)
-            self.Lx = 1.5 + total_grid_thickness + 3
+            self.Lx = upstream_gap + total_grid_thickness + 3.0
         else:
             self.Lx = params.get('Lx', self.Lx)
         
@@ -681,7 +683,11 @@ class DigitalTwinSimulator:
         if not hasattr(self, 'grid_deflections') or len(self.grid_deflections) != len(grids):
             self.grid_deflections = [0.0] * len(grids)
 
-        current_x = 0.5  # upstream margin start (mm)
+        # Upstream gap: distance from injection wall to left face of screen grid [mm]
+        upstream_gap = params.get('upstream_gap_mm', 0.5)
+        upstream_gap = max(upstream_gap, self.dx * 2)  # must be at least 2 cells from boundary
+        self.upstream_gap_mm = upstream_gap
+        current_x = upstream_gap  # left face of screen grid position [mm]
 
         # Hole centres depend on geometry mode
         if grids:
@@ -908,8 +914,8 @@ class DigitalTwinSimulator:
 
             v_bohm = np.sqrt(self.q_ion * Te_up / self.m_ion)
 
-            #injection_area_scale = 0.01 # 0.015
-            injection_area_scale = 1
+            injection_area_scale = 0.005 # 0.015
+            #injection_area_scale = 0.1
             injection_area = self.Ly * 1e-3 * injection_area_scale
             I_ion = self.q_ion * 0.61 * n0 * v_bohm * injection_area # 3.7-28 Goebbels
             charge_per_macro = self.q_ion * self.macro_weight
@@ -944,14 +950,15 @@ class DigitalTwinSimulator:
                         yhigh = min(2.5 * screen_r, self.Ly - self.dy)
                         new_y = np.random.uniform(ylow, yhigh, num_inject).astype(_NP_FP)
                     else:  # half_hole
-                        # Inject across the full half-domain (hole at y=0)
+                        # Inject within the aperture band only (hole centred at y=0)
+                        # The half-aperture spans from the axis up to the screen radius
                         ylow  = 0.0
-                        yhigh = self.Ly - self.dy
+                        yhigh = min(screen_r, self.Ly - self.dy)
                         new_y = np.random.uniform(ylow, yhigh, num_inject).astype(_NP_FP)
                 else:
                     new_y = np.random.uniform(self.dy, self.Ly - self.dy, num_inject).astype(_NP_FP)
 
-               # Inject exactly at the first interior cells to avoid a space-charge void
+                # Inject at the upstream boundary wall (x ≈ 0)
                 new_x = np.full(num_inject, self.dx * 1.5, dtype=_NP_FP)
 
                 v_spread = np.sqrt(self.q_ion * Ti / self.m_ion)
