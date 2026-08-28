@@ -26,8 +26,7 @@
     "Accel": 0.5,
     "Thresh": 10000.0,
     "sim_mode": "Thermal",
-    "geometry": "half_hole",
-    "upstream_gap_mm": 0.5
+    "geometry": "half_hole"
   },
 
   "rf_co_extraction": {
