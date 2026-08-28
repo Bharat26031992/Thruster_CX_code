@@ -29,7 +29,7 @@ from PyQt5.QtCore import Qt as QtCore_Qt
 from PyQt5.QtGui import QImage
 from scipy.interpolate import UnivariateSpline
 
-from physics_engine import DigitalTwinSimulator
+from physics_engine import DigitalTwinSimulator, compute_debye_upstream_gap
 
 
 class PyInstallerWorker(QThread):
@@ -996,8 +996,10 @@ class DigitalTwinApp(QMainWindow):
         )
         control_layout.addLayout(row)
         self.inputs["upstream_gap_mm"].setToolTip(
-            "Distance from the injection wall (left boundary) to the "
-            "left face of the screen grid [mm]. Default 0.5 mm."
+            "Distance from the injection wall to the left face of the screen grid [mm].\n"
+            "Set to 0 for automatic (physics-based): 80 λ_D if n0 ≤ 1e17,\n"
+            "40 λ_D if 1e17 < n0 ≤ 4e17, 30 λ_D otherwise.\n"
+            "After 'Build Domain' the computed value is shown here."
         )
         
         btn_layout = QHBoxLayout()
@@ -1034,6 +1036,10 @@ class DigitalTwinApp(QMainWindow):
         control_layout.addLayout(row)
         row, self.inputs["Te_up"] = self.create_input("Upstream Te (eV):", 0.0, 1000.0, 0.1, 4)
         control_layout.addLayout(row)
+        # Auto-refresh Upstream Gap whenever n0 or Te changes
+        self.inputs["n0_plasma"].valueChanged.connect(self._update_debye_gap)
+        self.inputs["Te_up"].valueChanged.connect(self._update_debye_gap)
+
         row, self.inputs["Ti"] = self.create_input("Ion Temp (eV):", 0.0, 1000.0, 0.1, 4)
         control_layout.addLayout(row)
         row, self.inputs["Tn"] = self.create_input("Neutral Temp (K):", 0.0, 10000.0, 1.0, 4)
@@ -1208,7 +1214,10 @@ class DigitalTwinApp(QMainWindow):
         self.inputs["Accel"].setValue(1.0)
         self.inputs["Thresh"].setValue(1e6)
         self.inputs["inj_time_us"].setValue(0.0)
-        self.inputs["upstream_gap_mm"].setValue(0.5)  # default: 0.5 mm upstream chamber
+        # Auto-compute Debye-based default gap (n0=1e17, Te=3.0 eV default)
+        _auto_gap = round(compute_debye_upstream_gap(1e17, 3.0), 3)
+        self._last_auto_gap = _auto_gap
+        self.inputs["upstream_gap_mm"].setValue(_auto_gap)
 
         # Neutralizer
         self.inputs["neut_rate"].setValue(30.0)
@@ -1229,6 +1238,28 @@ class DigitalTwinApp(QMainWindow):
         self.add_grid_ui(  0.0,  0.38, 2.00, 0.75, 0.0)   # Deccel grid
 
         self.lbl_status.setText("Status: No config.json found — using default values.")
+
+    def _update_debye_gap(self):
+        """Auto-update the Upstream Gap spinbox when n0 or Te_up change.
+
+        Only updates if the current spinbox value matches the last auto-computed
+        value — i.e. the user has not manually overridden it.
+        """
+        if not hasattr(self, '_last_auto_gap'):
+            return
+        current = round(self.inputs["upstream_gap_mm"].value(), 3)
+        if abs(current - self._last_auto_gap) > 0.001:
+            # User has manually set a different value — do not overwrite
+            return
+        n0    = self.inputs["n0_plasma"].value()
+        Te_up = self.inputs["Te_up"].value()
+        if n0 <= 0 or Te_up <= 0:
+            return
+        new_gap = round(compute_debye_upstream_gap(n0, Te_up), 3)
+        self._last_auto_gap = new_gap
+        self.inputs["upstream_gap_mm"].blockSignals(True)
+        self.inputs["upstream_gap_mm"].setValue(new_gap)
+        self.inputs["upstream_gap_mm"].blockSignals(False)
 
     def apply_config(self, config):
         self.config = config
@@ -1268,8 +1299,14 @@ class DigitalTwinApp(QMainWindow):
         }
 
         sim = config.get("simulation", {})
+        # Block signals while loading to avoid premature _update_debye_gap firings
+        self.inputs["n0_plasma"].blockSignals(True)
+        self.inputs["Te_up"].blockSignals(True)
         self.inputs["n0_plasma"].setValue(sim["n0_plasma"])
         self.inputs["Te_up"].setValue(sim["Te_up"])
+        self.inputs["n0_plasma"].blockSignals(False)
+        self.inputs["Te_up"].blockSignals(False)
+
         self.inputs["Ti"].setValue(sim["Ti"])
         self.inputs["Tn"].setValue(sim["Tn"])
         self.inputs["n0"].setValue(sim["n0"])
@@ -1286,7 +1323,12 @@ class DigitalTwinApp(QMainWindow):
         if idx_geom >= 0:
             self.combo_geometry.setCurrentIndex(idx_geom)
 
-        self.inputs["upstream_gap_mm"].setValue(sim.get("upstream_gap_mm", 0.5))
+        # Always compute Debye-based gap from the loaded n0 / Te_up.
+        # Do NOT read upstream_gap_mm from the config — it is a derived quantity.
+        _gap_val = round(compute_debye_upstream_gap(sim["n0_plasma"], sim["Te_up"]), 3)
+        self._last_auto_gap = _gap_val
+        self.inputs["upstream_gap_mm"].setValue(_gap_val)
+
 
         rf = config.get("rf_co_extraction", {})
         self.chk_rf.setChecked(rf["rf_enable"])
@@ -1454,6 +1496,13 @@ class DigitalTwinApp(QMainWindow):
 
         self.apply_advanced_settings_to_sim()
         self.sim.build_domain(self.get_params())
+
+        # Sync the spinbox to the actual gap used (auto Debye or user override)
+        gap_used = self.sim.upstream_gap_mm
+        self.inputs["upstream_gap_mm"].blockSignals(True)
+        self.inputs["upstream_gap_mm"].setValue(round(gap_used, 3))
+        self.inputs["upstream_gap_mm"].blockSignals(False)
+
         self.draw_static_domain()
 
         species_str = f"{self.beam_mass_amu:.3f} amu, +{self.beam_charge_state}"
@@ -1589,13 +1638,28 @@ class DigitalTwinApp(QMainWindow):
                 if len(e_x) > 0 else np.empty((0, 2))
             )
 
+            energy_min = float('inf')
+            energy_max = float('-inf')
+
             if np.any(prim_mask):
                 v_sq_prim = p_vx[prim_mask]**2 + p_vy[prim_mask]**2 + p_vz[prim_mask]**2
-                self.scat_prim.set_array((0.5 * self.sim.m_ion * v_sq_prim) / self.sim.q)
+                e_prim = (0.5 * self.sim.m_ion * v_sq_prim) / self.sim.q
+                self.scat_prim.set_array(e_prim)
+                energy_min = min(energy_min, np.min(e_prim))
+                energy_max = max(energy_max, np.max(e_prim))
 
             if np.any(cex_mask):
                 v_sq_cex = p_vx[cex_mask]**2 + p_vy[cex_mask]**2 + p_vz[cex_mask]**2
-                self.scat_cex.set_array((0.5 * self.sim.m_ion * v_sq_cex) / self.sim.q)
+                e_cex = (0.5 * self.sim.m_ion * v_sq_cex) / self.sim.q
+                self.scat_cex.set_array(e_cex)
+                energy_min = min(energy_min, np.min(e_cex))
+                energy_max = max(energy_max, np.max(e_cex))
+            
+            if energy_min != float('inf'):
+                if energy_max <= energy_min:
+                    energy_max = energy_min + 1.0
+                self.scat_prim.set_clim(energy_min, energy_max)
+                self.scat_cex.set_clim(energy_min, energy_max)
 
             if self.iedf_window and self.iedf_window.isVisible():
                 max_v = max([g["V"].value() for g in self.grid_widgets]) if self.grid_widgets else 1000.0
