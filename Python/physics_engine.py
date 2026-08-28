@@ -264,6 +264,45 @@ def _ti_arr(arr):
 
 
 # =============================================================================
+# STANDALONE HELPERS  (usable without instantiating the simulator)
+# =============================================================================
+
+def compute_debye_upstream_gap(n0: float, Te_up: float) -> float:
+    """Return the physics-recommended upstream gap [mm] based on Debye length.
+
+    Sheath-formation criterion (literature-based):
+      n0 <= 1e17  m^-3  →  80 * lambda_D
+      1e17 < n0 <= 4e17 →  40 * lambda_D
+      n0 > 4e17         →  30 * lambda_D
+
+    Parameters
+    ----------
+    n0 : float
+        Upstream plasma density [m^-3]
+    Te_up : float
+        Upstream electron temperature [eV]
+
+    Returns
+    -------
+    float
+        Recommended upstream gap in [mm]
+    """
+    eps0 = 8.854e-12
+    q    = 1.6e-19
+    debye_m  = np.sqrt(eps0 * Te_up / (q * n0 * 0.61))
+    debye_mm = debye_m * 1e3
+
+    if n0 <= 1e17:
+        n_debye = 80
+    elif n0 <= 4e17:
+        n_debye = 40
+    else:
+        n_debye = 30
+
+    return n_debye * debye_mm
+
+
+# =============================================================================
 # MAIN SIMULATOR CLASS
 # =============================================================================
 
@@ -573,19 +612,38 @@ class DigitalTwinSimulator:
     # ------------------------------------------------------------------
     def build_domain(self, params, preserve_state=False):
         grids   = params.get("grids", [])
-        upstream_gap = max(float(params.get('upstream_gap_mm', 0.5)), self.dx * 2)
-        self.upstream_gap_mm = upstream_gap
         if grids:
             total_grid_thickness = sum(g['t'] + g['gap'] for g in grids)
-            self.Lx = upstream_gap + total_grid_thickness + 3.0
         else:
-            self.Lx = params.get('Lx', self.Lx)
+            total_grid_thickness = 0.0
         
         pitch   = params.get("pitch_mm", params.get("discharge_chamber", {}).get("pitch_mm", 0.0) if isinstance(params.get("discharge_chamber"), dict) else 0.0)
         Te_up   = params.get('Te_up', 3.0)
 
         n0_n      = params.get("n0_plasma", 1e17)
-        debye_length = np.sqrt(self.eps0 * Te_up / (self.q * n0_n*0.61))
+        debye_length = np.sqrt(self.eps0 * Te_up / (self.q * n0_n * 0.61))
+        debye_mm = debye_length * 1e3   # Debye length in mm
+
+        # Physics-based recommended upstream gap (sheath formation criterion)
+        if n0_n <= 1e17:
+            n_debye = 80
+        elif n0_n <= 4e17:
+            n_debye = 40
+        else:
+            n_debye = 30
+        self.recommended_upstream_gap_mm = n_debye * debye_mm
+
+        # Use user value if non-zero, otherwise fall back to the auto Debye gap
+        user_gap = float(params.get('upstream_gap_mm', 0.0))
+        upstream_gap = user_gap if user_gap > 0.0 else self.recommended_upstream_gap_mm
+        upstream_gap = max(upstream_gap, self.dx * 2)  # minimum: 2 cells from boundary
+        self.upstream_gap_mm = upstream_gap
+
+        if grids:
+            self.Lx = upstream_gap + total_grid_thickness + 3.0
+        else:
+            self.Lx = params.get('Lx', self.Lx)
+
         if self.dx * 1e-3 > debye_length or self.dy * 1e-3 > debye_length:
             raise ValueError(
                 f"Grid spacing too large for Debye resolution: "
@@ -593,6 +651,7 @@ class DigitalTwinSimulator:
                 f"lambda_D={debye_length*1e3:.6f} mm. "
                 f"Choose dx, dy <= lambda_D."
             )
+
 
         plasma_freq = np.sqrt(n0_n * self.q**2 / (self.m_ion * self.eps0))
         elet_freq = np.sqrt(n0_n * self.q**2 / (self.m_e * self.eps0))
@@ -683,11 +742,7 @@ class DigitalTwinSimulator:
         if not hasattr(self, 'grid_deflections') or len(self.grid_deflections) != len(grids):
             self.grid_deflections = [0.0] * len(grids)
 
-        # Upstream gap: distance from injection wall to left face of screen grid [mm]
-        upstream_gap = params.get('upstream_gap_mm', 0.5)
-        upstream_gap = max(upstream_gap, self.dx * 2)  # must be at least 2 cells from boundary
-        self.upstream_gap_mm = upstream_gap
-        current_x = upstream_gap  # left face of screen grid position [mm]
+        current_x = self.upstream_gap_mm  # left face of screen grid position [mm]
 
         # Hole centres depend on geometry mode
         if grids:
