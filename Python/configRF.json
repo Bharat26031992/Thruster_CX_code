@@ -19,15 +19,14 @@
 
   "simulation": {
     "n0_plasma": 1e17,
-    "Te_up": 8.5,
+    "Te_up": 2.9,
     "Ti": 0.03446931259896,
     "Tn": 400.0,
     "n0": 5.271628e18,
     "Accel": 0.5,
     "Thresh": 10000.0,
     "sim_mode": "Thermal",
-    "geometry": "half_hole",
-    "upstream_gap_mm": 0.5
+    "geometry": "half_hole"
   },
 
   "rf_co_extraction": {
