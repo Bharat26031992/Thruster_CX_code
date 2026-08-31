@@ -621,19 +621,28 @@ class DigitalTwinSimulator:
         Te_up   = params.get('Te_up', 3.0)
 
         n0_n      = params.get("n0_plasma", 1e17)
+        entire_bulk_plasma = params.get("entire_bulk_plasma", False)
+
+        # Debye length is always needed for grid-spacing validation
         debye_length = np.sqrt(self.eps0 * Te_up / (self.q * n0_n * 0.61))
         debye_mm = debye_length * 1e3   # Debye length in mm
 
-        # Physics-based recommended upstream gap (sheath formation criterion)
-        if n0_n <= 1e17:
-            n_debye = 80
-        elif n0_n <= 4e17:
-            n_debye = 40
+        # Physics-based recommended upstream gap depending on simulation mode
+        if entire_bulk_plasma:
+            # Bulk plasma mode: Debye-length-based sheath-formation criterion
+            if n0_n <= 1e17:
+                n_debye = 80
+            elif n0_n <= 4e17:
+                n_debye = 40
+            else:
+                n_debye = 30
+            self.recommended_upstream_gap_mm = n_debye * debye_mm
         else:
-            n_debye = 30
-        self.recommended_upstream_gap_mm = n_debye * debye_mm
+            # Presheath mode (default): 0.75 × screen radius
+            screen_r = grids[0]['r'] if grids else 0.80
+            self.recommended_upstream_gap_mm = 0.75 * screen_r
 
-        # Use user value if non-zero, otherwise fall back to the auto Debye gap
+        # Use user value if non-zero, otherwise fall back to mode-appropriate default
         user_gap = float(params.get('upstream_gap_mm', 0.0))
         upstream_gap = user_gap if user_gap > 0.0 else self.recommended_upstream_gap_mm
         upstream_gap = max(upstream_gap, self.dx * 2)  # minimum: 2 cells from boundary
@@ -972,7 +981,11 @@ class DigitalTwinSimulator:
             injection_area_scale = 0.005 # 0.015
             #injection_area_scale = 0.1
             injection_area = self.Ly * 1e-3 * injection_area_scale
-            I_ion = self.q_ion * 0.61 * n0 * v_bohm * injection_area # 3.7-28 Goebbels
+            # Presheath mode: include Bohm factor 0.61 at the injection plane.
+            # Entire Bulk Plasma mode: no 0.61 (full density assumed at boundary).
+            entire_bulk_plasma = params.get('entire_bulk_plasma', False)
+            bohm_factor = 1.0 if entire_bulk_plasma else 0.61
+            I_ion = self.q_ion * bohm_factor * n0 * v_bohm * injection_area # 3.7-28 Goebbels
             charge_per_macro = self.q_ion * self.macro_weight
 
             num_inject_float = (I_ion * self.dt) / charge_per_macro
