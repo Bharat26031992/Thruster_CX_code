@@ -831,6 +831,8 @@ class DigitalTwinApp(QMainWindow):
         self.time_history = []   # simulated time [s]
         self.transparency_history  = []
         self.transparency3_history = []
+        self.active_cells_history  = []
+        self.low_ppc_cells_history = []
         self.T_histories = {}
         self.recorded_frames = []
         self.tracking_buffer = []
@@ -1570,12 +1572,32 @@ class DigitalTwinApp(QMainWindow):
         self.ebs_history.clear()
         self.div_history.clear()
         self.time_history.clear()
+        self.transparency_history.clear()
+        self.transparency3_history.clear()
+        self.active_cells_history.clear()
+        self.low_ppc_cells_history.clear()
         self.lblTime.setText("t_sim:        — µs")
         self.T_histories = {i: [] for i in range(len(self.grid_widgets))}
         self.tracking_buffer.clear()
 
         self.lbl_status.setText("Building Multi-Grid Domain...")
         QApplication.processEvents()
+
+        # -----------------------------------------------------------------
+        # Compute grid spacing from Debye length: dx = dy = 0.8 * lambda_D
+        # This ensures that the grid always resolves the Debye sheath with a
+        # safety margin (0.8 < 1), as required by PIC theory.
+        # -----------------------------------------------------------------
+        _n0   = self.inputs["n0_plasma"].value()
+        _Te   = self.inputs["Te_up"].value()
+        _eps0 = 8.854e-12
+        _q    = 1.602e-19
+        _lambda_D_m  = np.sqrt(_eps0 * _Te * _q / (_n0 * _q**2))  # [m]
+        _lambda_D_mm = _lambda_D_m * 1e3                           # [mm]
+        _dxy_mm = 0.8 * _lambda_D_mm
+        self.sim.dx = _dxy_mm
+        self.sim.dy = _dxy_mm
+        print(f"[Build Domain] lambda_D = {_lambda_D_mm:.4f} mm  →  dx = dy = {_dxy_mm:.4f} mm")
 
         self.apply_advanced_settings_to_sim()
         self.sim.build_domain(self.get_params())
@@ -1589,7 +1611,9 @@ class DigitalTwinApp(QMainWindow):
         self.draw_static_domain()
 
         cfg_name = getattr(self, "current_config_name", "config.json")
-        self.lbl_status.setText(f"Domain Ready [{cfg_name}]")
+        self.lbl_status.setText(
+            f"Domain Ready [{cfg_name}] | dx=dy={self.sim.dx:.4f} mm"
+        )
         self.lbl_temp.setText(
             "Grid Temps: " + " | ".join([f"G{i+1}: 26°C" for i in range(len(self.grid_widgets))])
         )
@@ -1761,6 +1785,8 @@ class DigitalTwinApp(QMainWindow):
         self.time_history.append(t_sim)
         self.transparency_history.append(transparency)
         self.transparency3_history.append(trans_last_frame)
+        self.active_cells_history.append(self.sim.total_active_cells)
+        self.low_ppc_cells_history.append(self.sim.low_ppc_cells)
 
         for i, T in enumerate(T_grids):
             self.T_histories[i].append(T)
@@ -1913,7 +1939,9 @@ class DigitalTwinApp(QMainWindow):
                     'iteration', 't_sim_s',
                     'minpotential',
                     'beamdivergencedeg',
-                    'transparency'
+                    'transparency',
+                    'total_active_cells',
+                    'cells_less_than_3_macroparticles'
                 ]
                 for i in range(len(self.T_histories)):
                     header.append(f"grid_{i+1}_temp_K")
@@ -1930,7 +1958,9 @@ class DigitalTwinApp(QMainWindow):
                         self.time_history[j] if j < len(self.time_history) else '',
                         self.ebs_history[j],
                         self.div_history[j],
-                        self.transparency_history[j] if j < len(self.transparency_history) else ''
+                        self.transparency_history[j] if j < len(self.transparency_history) else '',
+                        self.active_cells_history[j] if j < len(self.active_cells_history) else '',
+                        self.low_ppc_cells_history[j] if j < len(self.low_ppc_cells_history) else ''
                     ]
                     for i in range(len(self.T_histories)):
                         row.append(self.T_histories[i][j] if j < len(self.T_histories[i]) else "")
