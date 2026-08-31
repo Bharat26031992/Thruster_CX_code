@@ -710,6 +710,20 @@ class AdvancedSettingsDialog(QDialog):
         add_spin("Lx", "Domain Length (Lx, mm):", 5, 200, current_params["Lx"])
         add_spin("Ly", "Domain Height (Ly, mm):", 1, 50, current_params["Ly"])
 
+        # --- Entire Bulk Plasma option ---
+        self.chk_bulk = QCheckBox("Entire Bulk Plasma")
+        self.chk_bulk.setChecked(bool(current_params.get("entire_bulk_plasma", False)))
+        self.chk_bulk.setToolTip(
+            "When checked: simulates the entire bulk plasma region.\n"
+            "  • Upstream gap is set by Debye length (80/40/30 × λ_D).\n"
+            "  • No Bohm (0.61) factor applied to the ion current.\n"
+            "When unchecked (default): presheath mode.\n"
+            "  • Upstream gap = 0.75 × screen radius.\n"
+            "  • Ion current includes the Bohm factor (0.61).\n"
+            "In both modes the Upstream Gap spinbox can be manually overridden."
+        )
+        layout.addWidget(self.chk_bulk)
+
         layout.addLayout(self.form)
 
         btn_box = QHBoxLayout()
@@ -723,7 +737,9 @@ class AdvancedSettingsDialog(QDialog):
         layout.addLayout(btn_box)
 
     def get_values(self):
-        return {k: v.value() for k, v in self.inputs.items()}
+        result = {k: v.value() for k, v in self.inputs.items()}
+        result["entire_bulk_plasma"] = self.chk_bulk.isChecked()
+        return result
 
 
 class IEDFWindow(QWidget):
@@ -803,7 +819,9 @@ class DigitalTwinApp(QMainWindow):
         self.setWindowTitle("PY-BEMCS (Multi-Grid & Co-Extraction)")
         self.setGeometry(20, 30, 1500, 800)
 
-        self.config = load_json_config()
+        self.current_config_path = _config_path()
+        self.current_config_name = "config.json"
+        self.config = load_json_config(self.current_config_path)
         self.sim = DigitalTwinSimulator()
         self.sim_isRunning = False
 
@@ -836,7 +854,7 @@ class DigitalTwinApp(QMainWindow):
         self.setup_menu_bar()
         self.setup_ui()
         if self.config is not None:
-            self.apply_config(self.config)
+            self.apply_config(self.config, config_name=self.current_config_name)
         else:
             # No config.json found — load hardcoded defaults directly into the UI
             self._apply_defaults()
@@ -844,7 +862,6 @@ class DigitalTwinApp(QMainWindow):
         self.timer = QTimer()
         self.timer.timeout.connect(self.run_sim_step)
         self.timer.start(33)
-        self.lbl_status = QLabel("Status: Ready.")
 
     def setup_menu_bar(self):
         menubar = self.menuBar()
@@ -860,9 +877,9 @@ class DigitalTwinApp(QMainWindow):
         adv_action.triggered.connect(self.open_advanced_settings)
         settings_menu.addAction(adv_action)
 
-        reload_action = QAction("Reload config.json", self)
-        reload_action.triggered.connect(self.reload_config)
-        settings_menu.addAction(reload_action)
+        self.reload_action = QAction(f"Reload {self.current_config_name}", self)
+        self.reload_action.triggered.connect(self.reload_config)
+        settings_menu.addAction(self.reload_action)
 
         beam_menu = menubar.addMenu("Beam")
         assert beam_menu is not None # make type checkers aware beam menu is not None
@@ -901,8 +918,11 @@ class DigitalTwinApp(QMainWindow):
 
         try:
             cfg = load_json_config(file_name)
-            self.apply_config(cfg)
-            self.lbl_status.setText(f"Loaded config: {file_name}")
+            self.current_config_path = file_name
+            self.current_config_name = os.path.basename(file_name)
+            self.apply_config(cfg, config_name=self.current_config_name)
+            if hasattr(self, 'reload_action'):
+                self.reload_action.setText(f"Reload {self.current_config_name}")
         except Exception as e:
             QMessageBox.critical(self, "Config Error", f"Failed to load config:\n{e}")
 
@@ -997,9 +1017,13 @@ class DigitalTwinApp(QMainWindow):
         control_layout.addLayout(row)
         self.inputs["upstream_gap_mm"].setToolTip(
             "Distance from the injection wall to the left face of the screen grid [mm].\n"
-            "Set to 0 for automatic (physics-based): 80 λ_D if n0 ≤ 1e17,\n"
-            "40 λ_D if 1e17 < n0 ≤ 4e17, 30 λ_D otherwise.\n"
-            "After 'Build Domain' the computed value is shown here."
+            "\n"
+            "Presheath mode (default): auto = 0.75 × screen radius.\n"
+            "Entire Bulk Plasma mode: auto = Debye-based (80/40/30 × λ_D).\n"
+            "\n"
+            "Set to 0 to always use the automatic value for the active mode.\n"
+            "Any non-zero value manually entered here overrides the auto-computed gap.\n"
+            "After 'Build Domain' the value actually used is displayed here."
         )
         
         btn_layout = QHBoxLayout()
@@ -1103,13 +1127,14 @@ class DigitalTwinApp(QMainWindow):
         self.btn_save   = QPushButton("Save GIF Animation")
         self.btn_save.clicked.connect(self.save_gif)
 
-        self.lbl_status = QLabel("Status: Ready.")
-        self.lbl_temp   = QLabel("Grid Temps: Ready")
+        self.lbl_status   = QLabel("Status: Ready.")
+        self.lbl_temp     = QLabel("Grid Temps: Ready")
+        self.lbl_material = QLabel(f"Grid Material: {self.mat_name or 'Molybdenum'}")
 
         for w in [
             self.btn_build, self.btn_toggle, self.btn_csv, self.chk_track_ptcls,
             self.btn_export_trk, self.btn_iedf, self.chk_record, self.btn_save,
-            self.lbl_status, self.lbl_temp
+            self.lbl_status, self.lbl_temp, self.lbl_material
         ]:
             control_layout.addWidget(w)
 
@@ -1194,6 +1219,8 @@ class DigitalTwinApp(QMainWindow):
         # Material
         self.mat_name  = "Molybdenum"
         self.mat_props = GridMaterialDialog.PRESETS["Molybdenum"].copy()
+        if hasattr(self, 'lbl_material'):
+            self.lbl_material.setText(f"Grid Material: {self.mat_name}")
 
         # Advanced params
         self.adv_params = {
@@ -1203,6 +1230,7 @@ class DigitalTwinApp(QMainWindow):
             "m_e_ratio":      1000.0,
             "Lx":               20.0,
             "Ly":                3.0,
+            "entire_bulk_plasma": False,  # default: presheath mode
         }
 
         # Plasma / sputtering inputs
@@ -1214,8 +1242,9 @@ class DigitalTwinApp(QMainWindow):
         self.inputs["Accel"].setValue(1.0)
         self.inputs["Thresh"].setValue(1e6)
         self.inputs["inj_time_us"].setValue(0.0)
-        # Auto-compute Debye-based default gap (n0=1e17, Te=3.0 eV default)
-        _auto_gap = round(compute_debye_upstream_gap(1e17, 3.0), 3)
+        # Default (presheath) gap = 0.75 × default screen radius (0.80 mm)
+        _default_screen_r = 0.80
+        _auto_gap = round(0.75 * _default_screen_r, 3)
         self._last_auto_gap = _auto_gap
         self.inputs["upstream_gap_mm"].setValue(_auto_gap)
 
@@ -1244,6 +1273,10 @@ class DigitalTwinApp(QMainWindow):
 
         Only updates if the current spinbox value matches the last auto-computed
         value — i.e. the user has not manually overridden it.
+
+        In presheath mode (default) the gap depends on the screen radius, not
+        on n0/Te_up, so the spinbox is not changed by this handler.
+        In Entire Bulk Plasma mode the Debye-length-based gap is recomputed.
         """
         if not hasattr(self, '_last_auto_gap'):
             return
@@ -1251,17 +1284,33 @@ class DigitalTwinApp(QMainWindow):
         if abs(current - self._last_auto_gap) > 0.001:
             # User has manually set a different value — do not overwrite
             return
-        n0    = self.inputs["n0_plasma"].value()
-        Te_up = self.inputs["Te_up"].value()
-        if n0 <= 0 or Te_up <= 0:
-            return
-        new_gap = round(compute_debye_upstream_gap(n0, Te_up), 3)
+        bulk = self.adv_params.get("entire_bulk_plasma", False) if hasattr(self, 'adv_params') else False
+        if bulk:
+            # Bulk plasma: recompute from Debye length
+            n0    = self.inputs["n0_plasma"].value()
+            Te_up = self.inputs["Te_up"].value()
+            if n0 <= 0 or Te_up <= 0:
+                return
+            new_gap = round(compute_debye_upstream_gap(n0, Te_up), 3)
+        else:
+            # Presheath: gap = 0.75 × screen radius — read from first grid widget
+            if self.grid_widgets:
+                screen_r = self.grid_widgets[0]["r"].value()
+            else:
+                screen_r = 0.80  # safe fallback
+            new_gap = round(0.75 * screen_r, 3)
         self._last_auto_gap = new_gap
         self.inputs["upstream_gap_mm"].blockSignals(True)
         self.inputs["upstream_gap_mm"].setValue(new_gap)
         self.inputs["upstream_gap_mm"].blockSignals(False)
 
-    def apply_config(self, config):
+    def apply_config(self, config, config_name=None):
+        if config_name:
+            self.current_config_name = config_name
+        cfg_name = getattr(self, "current_config_name", "config.json")
+        if hasattr(self, 'reload_action'):
+            self.reload_action.setText(f"Reload {cfg_name}")
+
         self.config = config
         discharge_chamber = config.get("discharge_chamber", {})
         self.pitch_mm = discharge_chamber["pitch_mm"]
@@ -1296,6 +1345,7 @@ class DigitalTwinApp(QMainWindow):
             "m_e_ratio": adv["m_e_ratio"],
             "Lx": adv["Lx"],
             "Ly": adv["Ly"],
+            "entire_bulk_plasma": bool(adv.get("entire_bulk_plasma", False)),
         }
 
         sim = config.get("simulation", {})
@@ -1323,9 +1373,16 @@ class DigitalTwinApp(QMainWindow):
         if idx_geom >= 0:
             self.combo_geometry.setCurrentIndex(idx_geom)
 
-        # Always compute Debye-based gap from the loaded n0 / Te_up.
+        # Compute the auto upstream gap based on the active mode.
         # Do NOT read upstream_gap_mm from the config — it is a derived quantity.
-        _gap_val = round(compute_debye_upstream_gap(sim["n0_plasma"], sim["Te_up"]), 3)
+        grids_cfg = config.get("grids", [])
+        if self.adv_params["entire_bulk_plasma"]:
+            # Bulk plasma: Debye-length-based gap
+            _gap_val = round(compute_debye_upstream_gap(sim["n0_plasma"], sim["Te_up"]), 3)
+        else:
+            # Presheath (default): 0.75 × screen radius
+            _screen_r = grids_cfg[0]["r"] if grids_cfg else 0.80
+            _gap_val = round(0.75 * _screen_r, 3)
         self._last_auto_gap = _gap_val
         self.inputs["upstream_gap_mm"].setValue(_gap_val)
 
@@ -1354,25 +1411,49 @@ class DigitalTwinApp(QMainWindow):
 
         self.cs_store = load_cross_sections_from_config(config)
         self.pitch_mm = config.get("discharge_chamber", {}).get("pitch_mm", 3.0)
-        self.lbl_status.setText(f"Loaded config.json | {len(grids)} grids")
+        cfg_name = getattr(self, "current_config_name", "config.json")
+        self.lbl_status.setText(f"Loaded {cfg_name} | {len(grids)} grids")
         self.lbl_temp.setText("Grid Temps: " + " | ".join([f"G{i+1}: ready" for i in range(len(grids))]))
+        if hasattr(self, 'lbl_material'):
+            self.lbl_material.setText(f"Grid Material: {self.mat_name}")
 
     def reload_config(self):
-        cfg = load_json_config()
+        cfg_path = getattr(self, "current_config_path", None) or _config_path()
+        cfg_name = getattr(self, "current_config_name", "config.json")
+        cfg = load_json_config(cfg_path)
         if cfg is None:
             QMessageBox.warning(self, "No Config Found",
-                                "config.json not found. Using current defaults.")
+                                f"{cfg_name} not found. Using current defaults.")
             return
         try:
-            self.apply_config(cfg)
+            self.apply_config(cfg, config_name=cfg_name)
             QMessageBox.information(self, "Config Reloaded",
-                                    "config.json was reloaded successfully.")
+                                    f"{cfg_name} was reloaded successfully.")
         except Exception as e:
             QMessageBox.critical(self, "Config Error", f"Failed to reload config:\n{e}")
     def open_advanced_settings(self):
         dialog = AdvancedSettingsDialog(self.adv_params, self)
         if dialog.exec_() == QDialog.Accepted:
             self.adv_params.update(dialog.get_values())
+            # Refresh the upstream-gap spinbox auto-value to match the new mode,
+            # but only if the user has not manually overridden it.
+            if hasattr(self, '_last_auto_gap'):
+                current = round(self.inputs["upstream_gap_mm"].value(), 3)
+                if abs(current - self._last_auto_gap) <= 0.001:
+                    if self.adv_params.get("entire_bulk_plasma", False):
+                        n0    = self.inputs["n0_plasma"].value()
+                        Te_up = self.inputs["Te_up"].value()
+                        if n0 > 0 and Te_up > 0:
+                            new_gap = round(compute_debye_upstream_gap(n0, Te_up), 3)
+                        else:
+                            new_gap = self._last_auto_gap
+                    else:
+                        screen_r = self.grid_widgets[0]["r"].value() if self.grid_widgets else 0.80
+                        new_gap = round(0.75 * screen_r, 3)
+                    self._last_auto_gap = new_gap
+                    self.inputs["upstream_gap_mm"].blockSignals(True)
+                    self.inputs["upstream_gap_mm"].setValue(new_gap)
+                    self.inputs["upstream_gap_mm"].blockSignals(False)
             QMessageBox.information(
                 self, "Settings Updated",
                 "Advanced settings updated in memory. Click '1. BUILD DOMAIN' to apply."
@@ -1399,6 +1480,8 @@ class DigitalTwinApp(QMainWindow):
         dialog = GridMaterialDialog(self.mat_name, self.mat_props, self)
         if dialog.exec_() == QDialog.Accepted:
             self.mat_name, self.mat_props = dialog.get_values()
+            if hasattr(self, 'lbl_material'):
+                self.lbl_material.setText(f"Grid Material: {self.mat_name}")
             QMessageBox.information(
                 self, "Material Updated",
                 f"Grid material: {self.mat_name}\n"
@@ -1505,15 +1588,13 @@ class DigitalTwinApp(QMainWindow):
 
         self.draw_static_domain()
 
-        species_str = f"{self.beam_mass_amu:.3f} amu, +{self.beam_charge_state}"
-        cs_count = sum(1 for ds in self.cs_store.values() if ds.get("spline") is not None)
-        cs_str   = f" | {cs_count} CS loaded" if cs_count > 0 else ""
-        self.lbl_status.setText(
-            f"Domain Ready. Wt: {self.sim.macro_weight:.1e} | {species_str} | {self.mat_name}{cs_str}"
-        )
+        cfg_name = getattr(self, "current_config_name", "config.json")
+        self.lbl_status.setText(f"Domain Ready [{cfg_name}]")
         self.lbl_temp.setText(
             "Grid Temps: " + " | ".join([f"G{i+1}: 26°C" for i in range(len(self.grid_widgets))])
         )
+        if hasattr(self, 'lbl_material'):
+            self.lbl_material.setText(f"Grid Material: {self.mat_name}")
 
     def draw_static_domain(self):
         self.tempmesh = None
@@ -2172,8 +2253,9 @@ if __name__ == "__main__":
         cfg = load_json_config(sys.argv[1])
         if cfg is not None:
             try:
-                window.apply_config(cfg)
-                window.lbl_status.setText(f"Loaded config: {sys.argv[1]}")
+                window.current_config_path = sys.argv[1]
+                window.current_config_name = os.path.basename(sys.argv[1])
+                window.apply_config(cfg, config_name=window.current_config_name)
             except Exception as e:
                 QMessageBox.critical(window, "Config Error", f"Failed to load config:\n{e}")
         else:
