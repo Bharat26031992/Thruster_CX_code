@@ -395,6 +395,8 @@ class DigitalTwinSimulator:
         self.exit_v_std          = np.nan
         self.exit_energy_mean_eV = np.nan
         self.exit_count_step     = 0
+        self.total_active_cells  = 0
+        self.low_ppc_cells       = 0
 
         self.reset_arrays()
 
@@ -910,6 +912,14 @@ class DigitalTwinSimulator:
 
     # ------------------------------------------------------------------
     def compute_particle_substeps(self, x, y, vx, vy, vz, qm, dt, frac=0.25):
+        """
+        Dynamically calculates the number of sub-steps (n_sub) required for particle pushing.
+        
+        Sub-stepping ensures that fast-moving or strongly accelerated particles do not travel
+        more than a fraction of a grid cell (frac * min(dx, dy)) in a single push. This prevents
+        particles from skipping cells, avoids non-physical trajectory errors, ensures accurate
+        electric field interpolation, and prevents tunneling through grid boundaries.
+        """
         if len(x) == 0:
             return 1, 0.0, frac * min(self.dx, self.dy) * 1e-3
 
@@ -978,7 +988,7 @@ class DigitalTwinSimulator:
 
             v_bohm = np.sqrt(self.q_ion * Te_up / self.m_ion)
 
-            injection_area_scale = 0.005 # 0.015
+            injection_area_scale = 0.005 # 0.005
             #injection_area_scale = 0.1
             injection_area = self.Ly * 1e-3 * injection_area_scale
             # Presheath mode: include Bohm factor 0.61 at the injection plane.
@@ -1736,13 +1746,19 @@ class DigitalTwinSimulator:
         # 5. Evaluate the threshold
         # We ignore cells with 0 particles (vacuum/solid grids) to avoid false positives
         low_ppc_mask = (ppc_map > 0) & (ppc_map < 3)
+        self.total_active_cells = int(np.count_nonzero(ppc_map > 0))
+        self.low_ppc_cells = int(np.count_nonzero(low_ppc_mask))
 
         # 6. Check if any cells violate your condition
-        if np.any(low_ppc_mask):
-            num_violating_cells = np.count_nonzero(low_ppc_mask)
+        if self.low_ppc_cells > 0:
+            num_violating_cells = self.low_ppc_cells
+            total_active_cells = self.total_active_cells
+            pct_low = (num_violating_cells / total_active_cells * 100.0) if total_active_cells > 0 else 0.0
             min_ppc_found = np.min(ppc_map[ppc_map > 0]) # Lowest non-zero count
             
             print(f"Warning: {num_violating_cells} active cells have fewer than 3 macroparticles.")
+            print(f"Total active cells: {total_active_cells}")
+            print(f"Percentage of low PPC cells (< 3): {pct_low:.2f}%")
             print(f"Lowest non-zero PPC found: {min_ppc_found}")
             
             # Optional: Find exact coordinates of violating cells
