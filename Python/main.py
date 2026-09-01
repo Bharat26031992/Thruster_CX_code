@@ -71,12 +71,12 @@ class PyInstallerWorker(QThread):
 
         cmd = [
             sys.executable, "-m", "PyInstaller",
-            "--onefile",
-            "--name",    script_name,
-            "--distpath", dist_dir,
-            "--workpath", work_dir,
-            "--specpath", build_dir,
-            "--noconfirm",
+            "—onefile",
+            "—name",    script_name,
+            "—distpath", dist_dir,
+            "—workpath", work_dir,
+            "—specpath", build_dir,
+            "—noconfirm",
             self._script_path,
         ]
 
@@ -533,7 +533,7 @@ class CrossSectionViewerWindow(QWidget):
         left_widget.setMinimumWidth(280)
         left_widget.setMaximumWidth(350)
 
-        # --- Right: matplotlib plot ---
+        # —- Right: matplotlib plot —-
         self.fig, self.ax = plt.subplots(figsize=(7, 5))
         self.canvas = FigureCanvas(self.fig)
         self.canvas.setMinimumWidth(400)
@@ -689,7 +689,7 @@ class CrossSectionViewerWindow(QWidget):
         self.canvas.draw_idle()
 
 
-# --- ADVANCED SETTINGS DIALOG ---
+# —- ADVANCED SETTINGS DIALOG —-
 class AdvancedSettingsDialog(QDialog):
     def __init__(self, current_params, parent=None):
         super().__init__(parent)
@@ -717,7 +717,7 @@ class AdvancedSettingsDialog(QDialog):
         add_spin("Lx", "Domain Length (Lx, mm):", 5, 200, current_params["Lx"])
         add_spin("Ly", "Domain Height (Ly, mm):", 1, 50, current_params["Ly"])
 
-        # --- Entire Bulk Plasma option ---
+        # —- Entire Bulk Plasma option —-
         self.chk_bulk = QCheckBox("Entire Bulk Plasma")
         self.chk_bulk.setChecked(bool(current_params.get("entire_bulk_plasma", False)))
         self.chk_bulk.setToolTip(
@@ -820,6 +820,178 @@ class IEDFWindow(QWidget):
         self.canvas.draw_idle()
 
 
+class PPCWindow(QWidget):
+    """
+    Window displaying the 2D spatial distribution of Particles Per Cell (PPC).
+    Supports Time-Averaged Accumulator (Solution 2), Instantaneous PPC,
+    and Low PPC Warning (< 3 ptcls/cell) mask across Presheath, Optics, and Plume zones.
+
+    Uses GridSpec (not make_axes_locatable) so that ax.clear() / cax.clear() never
+    corrupts matplotlib's _shared_axes siblings graph, which would trigger a RecursionError.
+    """
+    def __init__(self, parent=None):
+        super().__init__()
+        self.parent_app = parent
+        self.setWindowTitle("Macroparticle Distribution per Cell (PPC)")
+        self.setGeometry(120, 120, 780, 540)
+
+        layout = QVBoxLayout(self)
+
+        # Controls row
+        ctrl_layout = QHBoxLayout()
+
+        self.combo_mode = QComboBox()
+        self.combo_mode.addItems([
+            "Time-Averaged PPC (Accumulator)",
+            "Instantaneous PPC (Current Step)",
+            "Low PPC Warning Mask (< 3 ptcls/cell)"
+        ])
+        self.combo_mode.currentIndexChanged.connect(self._on_mode_change)
+        ctrl_layout.addWidget(QLabel("<b>PPC Mode:</b>"))
+        ctrl_layout.addWidget(self.combo_mode)
+
+        self.chk_zones = QCheckBox("Show Physical Zones")
+        self.chk_zones.setChecked(True)
+        self.chk_zones.stateChanged.connect(self._on_mode_change)
+        ctrl_layout.addWidget(self.chk_zones)
+
+        self.btn_reset_accum = QPushButton("Reset Accumulator")
+        self.btn_reset_accum.clicked.connect(self._reset_accum)
+        ctrl_layout.addWidget(self.btn_reset_accum)
+
+        layout.addLayout(ctrl_layout)
+
+        # Statistics Summary Panel
+        self.lbl_stats = QLabel("Active Cells: — | Low PPC (< 3): — (—%) | Mean Active PPC: —")
+        self.lbl_stats.setStyleSheet(
+            "font-family: monospace; font-size: 11px; background-color: #f4f6f9; "
+            "padding: 6px; border: 1px solid #d0d7de; border-radius: 4px;"
+        )
+        layout.addWidget(self.lbl_stats)
+
+        # —- Matplotlib Figure with pre-allocated GridSpec axes —-
+        # Using GridSpec avoids make_axes_locatable, which corrupts _shared_axes
+        # on repeated ax.clear() calls and causes RecursionError in matplotlib.
+        self.fig = plt.figure(figsize=(7.5, 4.2))
+        gs = self.fig.add_gridspec(1, 2, width_ratios=[28, 1], wspace=0.05)
+        self.ax  = self.fig.add_subplot(gs[0])
+        self.cax = self.fig.add_subplot(gs[1])
+        self.cbar = None
+        self.canvas = FigureCanvas(self.fig)
+        layout.addWidget(self.canvas)
+
+    def _reset_accum(self):
+        if self.parent_app and hasattr(self.parent_app, 'sim'):
+            self.parent_app.sim.reset_ppc_accumulator()
+            self.update_plot(self.parent_app.sim)
+
+    def _on_mode_change(self):
+        if self.parent_app and hasattr(self.parent_app, 'sim'):
+            self.update_plot(self.parent_app.sim)
+
+    def update_plot(self, sim):
+        if sim is None or not hasattr(sim, 'nx') or sim.nx <= 0 or sim.ny <= 0:
+            return
+
+        mode = self.combo_mode.currentText()
+        if "Time-Averaged" in mode:
+            data = sim.get_avg_ppc_map()
+            title = f"Time-Averaged PPC — {getattr(sim, 'ppc_steps_count', 0)} steps"
+        elif "Instantaneous" in mode:
+            data = getattr(sim, 'current_ppc_map', np.zeros((sim.ny, sim.nx))).astype(float)
+            title = f"Instantaneous PPC — Step {sim.iteration}"
+        else:
+            cur = getattr(sim, 'current_ppc_map', np.zeros((sim.ny, sim.nx)))
+            data = np.where((cur > 0) & (cur < 3), 1.0, 0.0)
+            title = f"Low PPC Warning (< 3 particles/cell) — Step {sim.iteration}"
+
+        # Statistics
+        active_mask  = data > 0
+        total_active = int(np.count_nonzero(active_mask))
+        if "Low PPC" in mode:
+            low_count = int(np.count_nonzero(data == 1.0))
+        else:
+            low_count = int(np.count_nonzero((data > 0) & (data < 3)))
+        pct_low     = (low_count / total_active * 100.0) if total_active > 0 else 0.0
+        mean_active = float(np.mean(data[active_mask])) if total_active > 0 else 0.0
+
+        # Physical zone boundaries
+        x_up   = getattr(sim, 'upstream_gap_mm', 0.8)
+        x_last = sim.grid_x_ends[-1] if hasattr(sim, 'grid_x_ends') and sim.grid_x_ends else sim.Lx * 0.5
+        ix_up   = int(np.clip(round(x_up   / sim.dx), 0, sim.nx))
+        ix_last = int(np.clip(round(x_last / sim.dx), 0, sim.nx))
+
+        def _zone_stats(cols):
+            a = int(np.count_nonzero(active_mask[:, cols]))
+            l = int(np.count_nonzero((data[:, cols] > 0) & (data[:, cols] < 3)))
+            p = (l / a * 100.0) if a > 0 else 0.0
+            return a, l, p
+
+        act_up,  low_up,  pct_up  = _zone_stats(slice(None, ix_up))
+        act_opt, low_opt, pct_opt = _zone_stats(slice(ix_up, ix_last))
+        act_plm, low_plm, pct_plm = _zone_stats(slice(ix_last, None))
+
+        self.lbl_stats.setText(
+            f"Active Cells: {total_active} | Low PPC (< 3): {low_count} ({pct_low:.1f}%) | Mean PPC: {mean_active:.1f}\n"
+            f"Zones Low%:  Presheath {pct_up:.1f}% ({low_up}/{act_up})  |  "
+            f"Optics {pct_opt:.1f}% ({low_opt}/{act_opt})  |  "
+            f"Plume {pct_plm:.1f}% ({low_plm}/{act_plm})"
+        )
+
+        # Clear axes safely — reset axes locator to prevent matplotlib from
+        # nesting ColorbarLocator wrappers on every iteration (which triggers RecursionError after ~1000 steps).
+        self.ax.clear()
+        self.cax.set_axes_locator(None)
+        self.cax.clear()
+        self.cbar = None
+
+        self.ax.set_title(title, fontsize=10, pad=8)
+        self.ax.set_xlabel("Axial Position [mm]")
+        self.ax.set_ylabel("Radial Position [mm]")
+
+        extent = [0, sim.Lx, 0, sim.Ly]
+
+        if "Low PPC" in mode:
+            cmap = matplotlib.colormaps['Reds'].resampled(2)
+            im = self.ax.imshow(data, origin='lower', extent=extent,
+                                cmap=cmap, vmin=0, vmax=1, aspect='auto')
+        else:
+            vmax = max(10.0, float(np.percentile(data[data > 0], 98))) if np.any(data > 0) else 10.0
+            im = self.ax.imshow(data, origin='lower', extent=extent,
+                                cmap='turbo', vmin=0, vmax=vmax, aspect='auto')
+
+        # Grid boundary overlay
+        if hasattr(sim, 'isBound') and np.any(sim.isBound):
+            gy, gx = np.where(sim.isBound)
+            self.ax.scatter(gx * sim.dx, gy * sim.dy, s=3, c='black', alpha=0.7)
+
+        # Zone delimiter lines and labels
+        if self.chk_zones.isChecked():
+            self.ax.axvline(x=x_up,   color='white', linestyle='--', linewidth=1.2, alpha=0.8)
+            self.ax.axvline(x=x_last, color='cyan',  linestyle='--', linewidth=1.2, alpha=0.8)
+            y_pos = sim.Ly * 0.90
+            for xc, label in [
+                (x_up * 0.5,             "Presheath"),
+                ((x_up + x_last) * 0.5,  "Optics"),
+                ((x_last + sim.Lx) * 0.5, "Plume"),
+            ]:
+                self.ax.text(xc, y_pos, label, color='white', fontsize=8, ha='center',
+                             bbox=dict(boxstyle='round,pad=0.2', facecolor='black', alpha=0.6))
+
+        self.ax.set_xlim(0, sim.Lx)
+        self.ax.set_ylim(0, sim.Ly)
+
+        # Colorbar drawn into the pre-allocated cax (no shared-axis corruption)
+        self.cbar = self.fig.colorbar(im, cax=self.cax)
+        if "Low PPC" in mode:
+            self.cbar.set_ticks([0.25, 0.75])
+            self.cbar.set_ticklabels(["OK (>= 3)", "LOW (< 3)"])
+        else:
+            self.cbar.set_label("Particles / Cell (PPC)", fontsize=8)
+
+        self.canvas.draw_idle()
+
+
 class DigitalTwinApp(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -844,6 +1016,7 @@ class DigitalTwinApp(QMainWindow):
         self.recorded_frames = []
         self.tracking_buffer = []
         self.iedf_window = None
+        self.ppc_window = None
         self.cs_viewer_window = None
 
         self.cbar_temp = None
@@ -1096,17 +1269,17 @@ class DigitalTwinApp(QMainWindow):
         self.combo_geometry.addItems(["half_hole", "one_hole", "two_holes"])
         self.combo_geometry.setToolTip(
             "half_hole  — half-pitch symmetry, hole at y=0 (fastest, default)\n"
-            "one_hole   — full single-aperture domain, hole centred at y=1.5·r\n"
+            "one_hole   — full single-aperture domain, hole centred at y=1.5*r\n"
             "two_holes  — full dual-aperture domain, two holes one pitch apart"
         )
         control_layout.addWidget(self.combo_geometry)
 
-        # Injection time (µs) — 0 means “inject indefinitely” (current behaviour)
-        row, self.inputs["inj_time_us"] = self.create_input(
-            "Injection Time (µs):", 0.0, 1000.0, 0.01, 4
+        # Injection time (us) — 0 means "inject indefinitely" (current behaviour)
+        row, self.inputs["inj_time_µs"] = self.create_input(
+            "Injection Time (us):", 0.0, 1000.0, 0.01, 4
         )
         control_layout.addLayout(row)
-        self.inputs["inj_time_us"].setValue(0.0)  # default: unlimited injection
+        self.inputs["inj_time_µs"].setValue(0.0)  # default: unlimited injection
 
         control_layout.addSpacing(15)
         control_layout.addWidget(QLabel("5. NEUTRALIZER"))
@@ -1132,6 +1305,9 @@ class DigitalTwinApp(QMainWindow):
         self.btn_iedf = QPushButton("Show Energy Dist. (IEDF/EEDF)")
         self.btn_iedf.clicked.connect(self.open_iedf_window)
 
+        self.btn_ppc = QPushButton("Show PPC Distribution")
+        self.btn_ppc.clicked.connect(self.open_ppc_window)
+
         self.chk_record = QCheckBox("Record Frames (0)")
         self.btn_save   = QPushButton("Save GIF Animation")
         self.btn_save.clicked.connect(self.save_gif)
@@ -1142,18 +1318,18 @@ class DigitalTwinApp(QMainWindow):
 
         for w in [
             self.btn_build, self.btn_toggle, self.btn_csv, self.chk_track_ptcls,
-            self.btn_export_trk, self.btn_iedf, self.chk_record, self.btn_save,
+            self.btn_export_trk, self.btn_iedf, self.btn_ppc, self.chk_record, self.btn_save,
             self.lbl_status, self.lbl_temp, self.lbl_material
         ]:
             control_layout.addWidget(w)
 
-        # --- Performance Panel ---
+        # —- Performance Panel —-
         perfbox    = QGroupBox("⚡ Beam Diagnostics ")
         perflayout = QVBoxLayout()
         perflayout.setSpacing(2)
         perflayout.setContentsMargins(6, 4, 6, 4)
 
-        self.lblTime         = QLabel("t_sim:        — µs")
+        self.lblTime         = QLabel("t_sim:        — us")
         self.lblTransparency = QLabel("Transparency: —")
 
         for lbl in [self.lblTime, self.lblTransparency]:
@@ -1172,7 +1348,7 @@ class DigitalTwinApp(QMainWindow):
 
         grid = plt.GridSpec(3, 3, height_ratios=[1.2, 1, 0.9])
 
-        # --- Row 0: wide beam plot + narrow temperature map ---
+        # —- Row 0: wide beam plot + narrow temperature map —-
         self.ax_live = self.fig.add_subplot(grid[0, 0:2])
         self.ax_live.set_title("Ion Beam Extraction & Particle Tracking", fontsize=10)
         self.ax_live.set_xlabel("Axial Position [mm]")
@@ -1184,7 +1360,7 @@ class DigitalTwinApp(QMainWindow):
         self.ax_temp.set_xlabel("Axial Position [mm]", fontsize=8)
         self.ax_temp.set_ylabel("Radial Position [mm]", fontsize=8)   # units only — avoids crowding the colorbar
 
-        # --- Row 1: damage map + diagnostics ---
+        # —- Row 1: damage map + diagnostics —-
         self.ax_dmg = self.fig.add_subplot(grid[1, 0])
         self.ax_dmg.set_title("Sputter Damage Map", fontsize=10)
         self.ax_dmg.set_xlabel("Axial Position [mm]", fontsize=8)
@@ -1200,11 +1376,11 @@ class DigitalTwinApp(QMainWindow):
         self.ax_div.set_xlabel("Iteration", fontsize=8)
         self.ax_div.set_ylabel("[°]", fontsize=8)
 
-        # --- Row 2: full-width erosion profile ---
+        # —- Row 2: full-width erosion profile —-
         self.ax_groove = self.fig.add_subplot(grid[2, :])
         self.ax_groove.set_title("Accel Grid Erosion Profile", fontsize=10)
         self.ax_groove.set_xlabel("Radial Position [mm]")
-        self.ax_groove.set_ylabel("Erosion Depth [µm]")
+        self.ax_groove.set_ylabel("Erosion Depth [um]")
         self.ax_groove.grid(True, alpha=0.3)
         self.ax_groove.invert_yaxis()
 
@@ -1250,8 +1426,8 @@ class DigitalTwinApp(QMainWindow):
         self.inputs["n0"].setValue(1e18)
         self.inputs["Accel"].setValue(1.0)
         self.inputs["Thresh"].setValue(1e6)
-        self.inputs["inj_time_us"].setValue(0.0)
-        # Default (presheath) gap = 0.75 × default screen radius (0.80 mm)
+        self.inputs["inj_time_µs"].setValue(0.0)
+        # Default (presheath) gap = 0.75 x default screen radius (0.80 mm)
         _default_screen_r = 0.80
         _auto_gap = round(0.75 * _default_screen_r, 3)
         self._last_auto_gap = _auto_gap
@@ -1546,13 +1722,13 @@ class DigitalTwinApp(QMainWindow):
             })
         params["grids"] = grids
 
-        inj_time_us = self.inputs.get("inj_time_us", None)
-        if inj_time_us is not None:
-            params["inj_time"] = inj_time_us.value() * 1e-6
+        inj_time_µs = self.inputs.get("inj_time_µs", None)
+        if inj_time_µs is not None:
+            params["inj_time"] = inj_time_µs.value() * 1e-6
         else:
             params["inj_time"] = 0.0
 
-        params['macro_weight'] = self.sim.macro_weight   # ← ADD THIS
+        params['macro_weight'] = self.sim.macro_weight   # <- ADD THIS
         return params
 
     def toggle_sim(self):
@@ -1572,6 +1748,15 @@ class DigitalTwinApp(QMainWindow):
             self.iedf_window = IEDFWindow()
         self.iedf_window.show()
 
+    def open_ppc_window(self):
+        if self.ppc_window is None:
+            self.ppc_window = PPCWindow(self)
+        self.ppc_window.show()
+        self.ppc_window.raise_()
+        self.ppc_window.activateWindow()
+        if hasattr(self, 'sim'):
+            self.ppc_window.update_plot(self.sim)
+
     def build_domain(self):
         self.sim_isRunning = False
         self.btn_toggle.setText("2. START BEAM")
@@ -1583,18 +1768,18 @@ class DigitalTwinApp(QMainWindow):
         self.transparency3_history.clear()
         self.active_cells_history.clear()
         self.low_ppc_cells_history.clear()
-        self.lblTime.setText("t_sim:        — µs")
+        self.lblTime.setText("t_sim:        — us")
         self.T_histories = {i: [] for i in range(len(self.grid_widgets))}
         self.tracking_buffer.clear()
 
         self.lbl_status.setText("Building Multi-Grid Domain...")
         QApplication.processEvents()
 
-        # -----------------------------------------------------------------
+        # ————————————————————————————————-
         # Compute grid spacing from Debye length: dx = dy = 0.8 * lambda_D
         # This ensures that the grid always resolves the Debye sheath with a
         # safety margin (0.8 < 1), as required by PIC theory.
-        # -----------------------------------------------------------------
+        # ————————————————————————————————-
         _n0   = self.inputs["n0_plasma"].value()
         _Te   = self.inputs["Te_up"].value()
         _eps0 = 8.854e-12
@@ -1604,7 +1789,7 @@ class DigitalTwinApp(QMainWindow):
         _dxy_mm = 0.8 * _lambda_D_mm
         self.sim.dx = _dxy_mm
         self.sim.dy = _dxy_mm
-        print(f"[Build Domain] lambda_D = {_lambda_D_mm:.4f} mm  →  dx = dy = {_dxy_mm:.4f} mm")
+        print(f"[Build Domain] lambda_D = {_lambda_D_mm:.4f} mm  ->  dx = dy = {_dxy_mm:.4f} mm")
 
         self.apply_advanced_settings_to_sim()
         self.sim.build_domain(self.get_params())
@@ -1649,6 +1834,7 @@ class DigitalTwinApp(QMainWindow):
             divider = make_axes_locatable(self.ax_live)
             self.cax_live = divider.append_axes("right", size="3%", pad=0.1)
         else:
+            self.cax_live.set_axes_locator(None)
             self.cax_live.clear()
 
         self.cbar_energy = self.fig.colorbar(self.scat_prim, cax=self.cax_live)
@@ -1676,6 +1862,7 @@ class DigitalTwinApp(QMainWindow):
                 dividert = make_axes_locatable(self.ax_temp)
                 self.cax_temp = dividert.append_axes("right", size="5%", pad=0.1)
             else:
+                self.cax_temp.set_axes_locator(None)
                 self.cax_temp.clear()
             self.cbartemp = self.fig.colorbar(self.tempmesh, cax=self.cax_temp)
             self.cbartemp.set_label("Temperature °C")
@@ -1706,7 +1893,7 @@ class DigitalTwinApp(QMainWindow):
         t_sim = self.sim.iteration * self.sim.dt
         transparency = self.sim.get_transparency()
 
-        self.lblTime.setText(f"t_sim: {t_sim * 1e6:.2f} µs")
+        self.lblTime.setText(f"t_sim: {t_sim * 1e6:.2f} us")
         self.lblTransparency.setText(
             f"Transparency tot: {transparency:.3f}\n"
             f"Transparency frame: {trans_last_frame:.3f}\n"
@@ -1780,6 +1967,9 @@ class DigitalTwinApp(QMainWindow):
                     e_x, e_vx, e_vy,
                     self.sim.m_ion, self.sim.m_e, self.sim.q, max_v
                 )
+
+            if self.ppc_window and self.ppc_window.isVisible():
+                self.ppc_window.update_plot(self.sim)
 
         if self.chk_track_ptcls.isChecked():
             ptcl_data = self.sim.get_particle_kinematics()
@@ -1945,7 +2135,7 @@ class DigitalTwinApp(QMainWindow):
                 header = [
                     'iteration', 't_sim_s',
                     'minpotential',
-                    'beamdivergencedeg',
+                    'beamdivergence°',
                     'transparency',
                     'total_active_cells',
                     'cells_less_than_3_macroparticles'
@@ -2171,9 +2361,9 @@ class DigitalTwinApp(QMainWindow):
             progress.close()
             self.sim_isRunning = was_running
 
-    # ------------------------------------------------------------------
+    # —————————————————————————————————
     # Build standalone .exe via PyInstaller
-    # ------------------------------------------------------------------
+    # —————————————————————————————————
     def build_exe(self):
         """Compile main.py into a standalone executable using PyInstaller.
 
@@ -2215,7 +2405,7 @@ class DigitalTwinApp(QMainWindow):
 
         # 4. Build progress dialog
         progress = QProgressDialog(
-            "Initialising PyInstaller…", "Cancel", 0, 100, self
+            "Initialising PyInstaller...", "Cancel", 0, 100, self
         )
         progress.setWindowTitle("Building .exe")
         progress.setWindowModality(Qt.WindowModal)
@@ -2240,7 +2430,7 @@ class DigitalTwinApp(QMainWindow):
             stripped = line.strip()
             if stripped:
                 # Truncate very long lines so they fit in the dialog
-                display = stripped if len(stripped) <= 80 else stripped[:77] + "…"
+                display = stripped if len(stripped) <= 80 else stripped[:77] + "..."
                 progress.setLabelText(display)
             QApplication.processEvents()
 
@@ -2253,7 +2443,7 @@ class DigitalTwinApp(QMainWindow):
             progress.setValue(100)
             progress.close()
             if success:
-                self.lbl_status.setText(f"Build complete → {message}")
+                self.lbl_status.setText(f"Build complete -> {message}")
                 QMessageBox.information(
                     self, "Build Successful",
                     f"Executable created successfully:\n\n{message}\n\n"
@@ -2264,7 +2454,7 @@ class DigitalTwinApp(QMainWindow):
                 log_snippet = "\n".join(self._build_log_lines[-20:])
                 QMessageBox.critical(
                     self, "Build Failed",
-                    f"{message}\n\n--- Last build output ---\n{log_snippet}"
+                    f"{message}\n\n—- Last build output —-\n{log_snippet}"
                 )
 
         def _on_cancel():
