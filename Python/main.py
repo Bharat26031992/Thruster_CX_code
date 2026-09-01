@@ -219,6 +219,13 @@ def _config_path():
     return os.path.join(base, "config.json")
 
 def load_json_config(config_path=None):
+    """
+    Loads and parses a JSON configuration file for the simulation.
+    If no path is provided, it defaults to the 'config.json' located next to the
+    executable or main.py. Returns a dictionary with configuration parameters if
+    the file exists, or None if the file is not found (allowing the caller to fall
+    back to default values).
+    """
     if config_path is None:
         config_path = _config_path()
 
