@@ -999,10 +999,9 @@ class DigitalTwinSimulator:
             charge_per_macro = self.q_ion * self.macro_weight
 
             num_inject_float = (I_ion * self.dt) / charge_per_macro
-            num_inject = int(num_inject_float)
-            # Accumulate fractional probability to maintain exact steady-state density
-            if np.random.rand() < (num_inject_float - num_inject):
-                num_inject += 3
+            # Use Poisson sampling: gives statistically correct particle count including
+            # sub-particle fractional contributions, without the arbitrary +3 hack.
+            num_inject = np.random.poisson(num_inject_float)
 
             if num_inject > 0:
                 geometry = getattr(self, 'geometry', 'half_hole')
@@ -1730,10 +1729,11 @@ class DigitalTwinSimulator:
         p_x_active = self.p_x[:self.num_p]
         p_y_active = self.p_y[:self.num_p]
 
-        # 2. Map continuous coordinates to grid cell indices
-        # Note: Using floor division / casting to int to find the cell the particle is inside
-        ix = np.clip((p_x_active / (self.dx * 1e-3)).astype(int), 0, self.nx - 1)
-        iy = np.clip((p_y_active / (self.dy * 1e-3)).astype(int), 0, self.ny - 1)
+        # 2. Map continuous coordinates to grid cell indices.
+        # Particle positions (p_x, p_y) are stored in mm; self.dx/self.dy are also in mm.
+        # Dividing mm by mm gives a dimensionless cell index — do NOT convert dx to metres here.
+        ix = np.clip((p_x_active / self.dx).astype(int), 0, self.nx - 1)
+        iy = np.clip((p_y_active / self.dy).astype(int), 0, self.ny - 1)
 
         # 3. Convert 2D indices to a 1D flat index for bincount
         flat_idx = iy * self.nx + ix
