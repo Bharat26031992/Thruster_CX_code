@@ -13,7 +13,7 @@ if USE_TAICHI:
 _TI_FP = ti.f32
 _NP_FP = np.float32
 
-# --- Optional GPU Poisson via CuPy (falls back silently if unavailable) ---
+# —- Optional GPU Poisson via CuPy (falls back silently if unavailable) —-
 try:
     import cupy as cp
     import cupyx.scipy.sparse as cp_sp
@@ -193,7 +193,7 @@ def push_particles_boris_cpu(x, y, vx, vy, vz,
     if n == 0:
         return
 
-    # --- Bilinear (CIL) field interpolation ---
+    # —- Bilinear (CIL) field interpolation —-
     nx_m1 = nx - 1
     ny_m1 = ny - 1
 
@@ -217,10 +217,10 @@ def push_particles_boris_cpu(x, y, vx, vy, vz,
     Ex_p = interp(Ex);  Ey_p = interp(Ey)
     Bx_p = interp(Bx);  By_p = interp(By);  Bz_p = interp(Bz)
 
-    # --- Boris algorithm (vectorised) ---
+    # —- Boris algorithm (vectorised) —-
     hqmdt = 0.5 * q_m * dt          # half charge-mass-time factor
 
-    # Step 1: first half E-field kick  →  v_minus
+    # Step 1: first half E-field kick  ->  v_minus
     vmx = vx[:n] + hqmdt * Ex_p
     vmy = vy[:n] + hqmdt * Ey_p
     vmz = vz[:n]  # no Ez in 2D
@@ -271,19 +271,19 @@ def compute_debye_upstream_gap(n0: float, Te_up: float) -> float:
     """Return the physics-recommended upstream gap [mm] based on Debye length.
 
     Sheath-formation criterion (literature-based):
-      n0 <= 1e17  m^-3  →  80 * lambda_D
-      1e17 < n0 <= 4e17 →  40 * lambda_D
-      n0 > 4e17         →  30 * lambda_D
+      n0 <= 1e17  m^-3  →  80 * λ_D
+      1e17 < n0 <= 4e17 →  40 * λ_D
+      n0 > 4e17         →  30 * λ_D
 
     Parameters
-    ----------
+    —————
     n0 : float
         Upstream plasma density [m^-3]
     Te_up : float
         Upstream electron temperature [eV]
 
     Returns
-    -------
+    ———-
     float
         Recommended upstream gap in [mm]
     """
@@ -400,7 +400,7 @@ class DigitalTwinSimulator:
 
         self.reset_arrays()
 
-    # ------------------------------------------------------------------
+    # —————————————————————————————————
     def reset_arrays(self):
         self.max_p = 100000
         self.max_e = 100000
@@ -432,6 +432,10 @@ class DigitalTwinSimulator:
         self.Bx = np.zeros((self.ny, self.nx), dtype=_NP_FP)
         self.By = np.zeros((self.ny, self.nx), dtype=_NP_FP)
         self.Bz = np.zeros((self.ny, self.nx), dtype=_NP_FP)
+
+        self.accum_ppc_map   = np.zeros((self.ny, self.nx), dtype=np.float64)
+        self.ppc_steps_count = 0
+        self.current_ppc_map = np.zeros((self.ny, self.nx), dtype=int)
 
     def _recompute_cell_constants(self):
         self.C_cell = self.mat_rho * (self.dx*1e-3) * (self.dy*1e-3) * 1e-3 * self.mat_cp
@@ -507,7 +511,7 @@ class DigitalTwinSimulator:
         self.e_vz[s:e] = vz
         self.num_e += n_new
 
-    # ------------------------------------------------------------------
+    # —————————————————————————————————
     def build_sparse_matrix(self):
         periodic_y = getattr(self, 'periodic_y', False)
         N   = self.nx * self.ny
@@ -539,27 +543,27 @@ class DigitalTwinSimulator:
 
         row, col, data = [], [], []
 
-        # --- Dirichlet (fixed-voltage) cells ---
+        # —- Dirichlet (fixed-voltage) cells —-
         idx_b = idx[is_bound]
         row.append(idx_b); col.append(idx_b); data.append(np.ones_like(idx_b))
 
-        # --- Neumann right: V[iy, nx-1] = V[iy, nx-2] ---
+        # —- Neumann right: V[iy, nx-1] = V[iy, nx-2] —-
         idx_r = idx[is_right]
         row.append(idx_r); col.append(idx_r);   data.append( np.ones_like(idx_r))
         row.append(idx_r); col.append(idx_r-1); data.append(-np.ones_like(idx_r))
 
         if not periodic_y:
-            # --- Neumann top: V[ny-1, ix] = V[ny-2, ix] ---
+            # —- Neumann top: V[ny-1, ix] = V[ny-2, ix] —-
             idx_t = idx[is_top]
             row.append(idx_t); col.append(idx_t);         data.append( np.ones_like(idx_t))
             row.append(idx_t); col.append(idx_t-self.nx); data.append(-np.ones_like(idx_t))
 
-            # --- Neumann bottom: V[0, ix] = V[1, ix] ---
+            # —- Neumann bottom: V[0, ix] = V[1, ix] —-
             idx_bot = idx[is_bottom]
             row.append(idx_bot); col.append(idx_bot);         data.append( np.ones_like(idx_bot))
             row.append(idx_bot); col.append(idx_bot+self.nx); data.append(-np.ones_like(idx_bot))
 
-        # --- Standard 5-point interior stencil ---
+        # —- Standard 5-point interior stencil —-
         idx_in = idx[is_interior]
         row.append(idx_in); col.append(idx_in);          data.append(np.full_like(idx_in, -4.0))
         row.append(idx_in); col.append(idx_in-1);        data.append(np.ones_like(idx_in))
@@ -568,7 +572,7 @@ class DigitalTwinSimulator:
         row.append(idx_in); col.append(idx_in+self.nx);  data.append(np.ones_like(idx_in))
 
         if periodic_y:
-            # --- Periodic bottom row (iy=0): 5-pt with south neighbour = iy=ny-1 ---
+            # —- Periodic bottom row (iy=0): 5-pt with south neighbour = iy=ny-1 —-
             idx_pb   = idx[is_per_bot]
             col_south = (self.ny - 1) * self.nx + (idx_pb % self.nx)
             row.append(idx_pb); col.append(idx_pb);         data.append(np.full_like(idx_pb, -4.0))
@@ -577,7 +581,7 @@ class DigitalTwinSimulator:
             row.append(idx_pb); col.append(idx_pb + self.nx); data.append(np.ones_like(idx_pb)) # north (iy=1)
             row.append(idx_pb); col.append(col_south);      data.append(np.ones_like(idx_pb))  # periodic south
 
-            # --- Periodic top row (iy=ny-1): 5-pt with north neighbour = iy=0 ---
+            # —- Periodic top row (iy=ny-1): 5-pt with north neighbour = iy=0 —-
             idx_pt   = idx[is_per_top]
             col_north = idx_pt % self.nx  # iy=0
             row.append(idx_pt); col.append(idx_pt);         data.append(np.full_like(idx_pt, -4.0))
@@ -611,7 +615,7 @@ class DigitalTwinSimulator:
                 print(f"[Poisson] GPU factorization failed, using CPU: {exc}")
                 self.laplacian_lu_gpu = None
 
-    # ------------------------------------------------------------------
+    # —————————————————————————————————
     def build_domain(self, params, preserve_state=False):
         grids   = params.get("grids", [])
         if grids:
@@ -685,12 +689,12 @@ class DigitalTwinSimulator:
                 f"vmax={vmax:.2e} m/s. "
                 f"Choose dx, dy and dt such that dx/dt >= vmax and dy/dt >= vmax."
             )
-        # ----------------------------------------------------------------
+        # ————————————————————————————————
         # GEOMETRY MODE: selects domain height and hole layout
         # 'half_hole' — half-pitch symmetry plane at y=0 (default)
         # 'one_hole'  — full single-aperture domain
         # 'two_holes' — full dual-aperture domain (one pitch)
-        # ----------------------------------------------------------------
+        # ————————————————————————————————
         geometry = params.get('geometry', 'half_hole')
         self.geometry = geometry  # stored so step() can reuse without re-reading params
         # y=0 and y=Ly are physical symmetry planes only in half_hole.
@@ -832,7 +836,7 @@ class DigitalTwinSimulator:
         self.build_sparse_matrix()
         self.recalc_poisson(iterations=30 if not preserve_state else 10, params=params)
 
-    # ------------------------------------------------------------------
+    # —————————————————————————————————
     def recalc_poisson(self, iterations=5, params=None):
         if self.laplacian_lu is None:
             return
@@ -861,7 +865,7 @@ class DigitalTwinSimulator:
         # differences with wrap-around.
         if getattr(self, 'periodic_y', False):
             two_dy_m = 2.0 * self.dy * 1e-3
-            # iy=0: central = (V[ny-1] - V[1]) / (2*dy)  →  Ey = (V[ny-1] - V[1]) / (2*dy)
+            # iy=0: central = (V[ny-1] - V[1]) / (2*dy)  ->  Ey = (V[ny-1] - V[1]) / (2*dy)
             self.Ey[0, :]       = (self.V[self.ny-1, :] - self.V[1, :])       / two_dy_m
             # iy=ny-1: central = (V[ny-2] - V[0]) / (2*dy)
             self.Ey[self.ny-1, :] = (self.V[self.ny-2, :] - self.V[0, :]) / two_dy_m
@@ -910,7 +914,7 @@ class DigitalTwinSimulator:
 
         self.V = cp.asnumpy(V_gpu)
 
-    # ------------------------------------------------------------------
+    # —————————————————————————————————
     def compute_particle_substeps(self, x, y, vx, vy, vz, qm, dt, frac=0.25):
         """
         Dynamically calculates the number of sub-steps (n_sub) required for particle pushing.
@@ -951,7 +955,7 @@ class DigitalTwinSimulator:
         n_sub = max(1, int(np.ceil(ds_max / max(ds_lim, 1e-30))))
         return n_sub, ds_max, ds_lim
     
-    # ------------------------------------------------------------------
+    # —————————————————————————————————
     def step(self, params):
         if self.laplacian_lu is None:
             return False, np.nan, np.nan, self.T_grids, 0.0
@@ -967,7 +971,7 @@ class DigitalTwinSimulator:
         self.injected_ions_step = 0.0
         self.lost_to_grid_step = 0.0
 
-        # --- RF CO-EXTRACTION ---
+        # —- RF CO-EXTRACTION —-
         if params.get('rf_enable') and grids:
             rf_idx = params.get('rf_grid_idx', 0)
             if rf_idx < len(grids):
@@ -976,9 +980,9 @@ class DigitalTwinSimulator:
                 self.V_fixed[self.mask_grids[rf_idx]] = self.Vdc[self.mask_grids[rf_idx]] + v_rf
                 self.recalc_poisson(iterations=2, params=params)
 
-        # ----------------------------------------------------------------
+        # ————————————————————————————————
         # A. INJECT PARTICLES
-        # ----------------------------------------------------------------
+        # ————————————————————————————————
         if self.injection_enabled and (
             self.injection_stop_time is None or t_current <= self.injection_stop_time
         ):
@@ -1068,7 +1072,7 @@ class DigitalTwinSimulator:
                     new_evz = (np.random.randn(num_inj_e) * v_e_th_source).astype(_NP_FP)
                     self._add_electrons(new_ex, new_ey, new_evx, new_evy, new_evz)
 
-        # --- NEUTRALIZER ---
+        # —- NEUTRALIZER —-
         num_e_neut = int(params.get('neut_rate', 30))
         Te_eV = params.get('Te', 5.0)
         neut_x_param = params.get('neut_x', self.Lx - 0.5)
@@ -1084,9 +1088,9 @@ class DigitalTwinSimulator:
             new_evz = (np.random.randn(num_e_neut) * v_e_th).astype(_NP_FP)
             self._add_electrons(new_ex, new_ey, new_evx, new_evy, new_evz)
 
-        # ----------------------------------------------------------------
+        # ————————————————————————————————
         # B. POISSON SOLVER
-        # ----------------------------------------------------------------
+        # ————————————————————————————————
         self.rho.fill(0.0)
         cell_vol = (self.dx * 1e-3) * (self.dy * 1e-3) * 1e-3
         charge_per_particle = self.q * self.macro_weight
@@ -1146,9 +1150,9 @@ class DigitalTwinSimulator:
         if self.iteration % 2 == 0:
             self.recalc_poisson(iterations=5, params=params)
 
-        # ----------------------------------------------------------------
+        # ————————————————————————————————
         # C. PUSH PARTICLES
-        # ----------------------------------------------------------------
+        # ————————————————————————————————
         num_p_step = int(self.num_p)
 
         p_x_old = self.p_x[:num_p_step].copy()
@@ -1268,10 +1272,10 @@ class DigitalTwinSimulator:
                         -self.q / self.m_e
                     )
 
-        # ----------------------------------------------------------------
+        # ————————————————————————————————
         # Periodic y wrap-around (one_hole / two_holes only)
         # Replaces boundary-kill for y-edges; must happen BEFORE hit detection
-        # ----------------------------------------------------------------
+        # ————————————————————————————————
         if getattr(self, 'periodic_y', False):
             if num_p_step > 0:
                 self.p_y[:num_p_step] = np.mod(self.p_y[:num_p_step], self.Ly)
@@ -1296,9 +1300,9 @@ class DigitalTwinSimulator:
             x_exit_last = 3.0
             x_plume_boundary = 3.0
 
-        # ----------------------------------------------------------------
+        # ————————————————————————————————
         # D. ION DIAGNOSTICS / HITS / EROSION / SEE
-        # ----------------------------------------------------------------
+        # ————————————————————————————————
         entered_first_grid_mask = (
             (p_x_old < x_entry_first_grid) &
             (p_x >= x_entry_first_grid) &
@@ -1321,9 +1325,9 @@ class DigitalTwinSimulator:
         impact_ix = np.where(hit_grid_path, path_ix, ix)
         impact_iy = np.where(hit_grid_path, path_iy, iy)
 
-        # ----------------------------------------------------------------
+        # ————————————————————————————————
         # 1. Out of Bounds
-        # ----------------------------------------------------------------
+        # ————————————————————————————————
         if getattr(self, 'periodic_y', False):
             # In periodic mode, p_y is already wrapped to [0, Ly], so it can never be OOB.
             out_of_bounds = (
@@ -1352,7 +1356,7 @@ class DigitalTwinSimulator:
             E_joules = 0.5 * self.m_ion * v_mag_sq * self.macro_weight
             dT_heat = (E_joules / self.C_cell) * self.thermal_accel
 
-            # --- Diagnostic: Check hits on Grid 2 (Accelerator Grid) ---
+            # —- Diagnostic: Check hits on Grid 2 (Accelerator Grid) —-
             if len(self.mask_grids) > 1:
                 hit_iy_sub = impact_iy[valid_thermal_hit]
                 hit_ix_sub = impact_ix[valid_thermal_hit]
@@ -1514,9 +1518,9 @@ class DigitalTwinSimulator:
         self.p_isCEX[:new_num_p] = p_cex[keep_mask]
         self.num_p = new_num_p
 
-        # ----------------------------------------------------------------
+        # ————————————————————————————————
         # E. PURGE DEAD ELECTRONS
-        # ----------------------------------------------------------------
+        # ————————————————————————————————
         if self.num_e > 0:
             e_x = self.e_x[:self.num_e]
             e_y = self.e_y[:self.num_e]
@@ -1546,9 +1550,9 @@ class DigitalTwinSimulator:
                 self.e_vz[:n_alive_e] = e_vz[alive_e]
                 self.num_e = n_alive_e
 
-        # ----------------------------------------------------------------
+        # ————————————————————————————————
         # F. THERMAL
-        # ----------------------------------------------------------------
+        # ————————————————————————————————
         if sim_mode in ['Thermal', 'Both']:
             T_bound = self.Tmap[self.isBound]
             cooling_factor = (self.emissivity * self.sb_sigma * self.A_cell * self.dt * self.thermal_accel) / self.C_cell
@@ -1632,12 +1636,12 @@ class DigitalTwinSimulator:
                 self.build_domain(params, preserve_state=True)
                 remeshed = True
 
-        # ----------------------------------------------------------------
+        # ————————————————————————————————
         # G. MID-HOLE POTENTIAL DIAGNOSTIC
         # Evaluate centrerline potential at the axial midpoint of the
         # first downstream grid (grid 2 if present, else grid 1),
         # at the radial centre of the relevant aperture(s).
-        # ----------------------------------------------------------------
+        # ————————————————————————————————
         geometry = getattr(self, 'geometry', 'half_hole')
         hole_centers = getattr(self, 'hole_centers', [0.0])
 
@@ -1662,9 +1666,9 @@ class DigitalTwinSimulator:
             min_pot = self.V[self.ny // 2, x_idx]
 
 
-        # ----------------------------------------------------------------
+        # ————————————————————————————————
         # H. CEX COLLISIONS
-        # ----------------------------------------------------------------
+        # ————————————————————————————————
         if self.num_p > 0:
             p_x = self.p_x[:self.num_p]
             p_y = self.p_y[:self.num_p]
@@ -1742,6 +1746,9 @@ class DigitalTwinSimulator:
         # minlength ensures the output array matches your full grid size
         ppc_flat = np.bincount(flat_idx, minlength=self.nx * self.ny)
         ppc_map = ppc_flat.reshape((self.ny, self.nx))
+        self.current_ppc_map = ppc_map
+        self.accum_ppc_map += ppc_map
+        self.ppc_steps_count += 1
 
         # 5. Evaluate the threshold
         # We ignore cells with 0 particles (vacuum/solid grids) to avoid false positives
@@ -1766,7 +1773,21 @@ class DigitalTwinSimulator:
             # print(f"First violating cell at x={bad_ix[0]*self.dx:.2f}mm, y={bad_iy[0]*self.dy:.2f}mm")
         return remeshed, min_pot, current_div, self.T_grids, trans_last_frame
 
-    # ------------------------------------------------------------------
+    def reset_ppc_accumulator(self):
+        """Resets the time-averaged PPC spatial accumulator."""
+        if hasattr(self, 'accum_ppc_map'):
+            self.accum_ppc_map.fill(0.0)
+        self.ppc_steps_count = 0
+
+    def get_avg_ppc_map(self):
+        """Returns the time-averaged 2D PPC map across accumulated steps."""
+        if hasattr(self, 'accum_ppc_map') and self.ppc_steps_count > 0:
+            return self.accum_ppc_map / float(self.ppc_steps_count)
+        if hasattr(self, 'current_ppc_map'):
+            return self.current_ppc_map.astype(np.float64)
+        return np.zeros((self.ny, self.nx), dtype=np.float64)
+
+    # —————————————————————————————————
     def get_third_grid_transparency_frame(self):
         if self.entered_optics_step <= 0.0: return 0.0
         return self.transmitted3_step / self.entered_optics_step
