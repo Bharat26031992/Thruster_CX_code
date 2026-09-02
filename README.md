@@ -255,7 +255,7 @@ Bharat Singh Rawat. (2026). *Python Beam Extraction and Monte Carlo Simulator (P
 ```bibtex
 @software{PY-BEMCS,
   author       = {Bharat Singh Rawat},
-  contributors = {Nick Magrin (University of Padua)}
+  contributors = {Nick Magrin (University of Padua)},
   title        = {Python Beam Extraction and Monte Carlo Simulator (PY-BEMCS)},
   year         = {2026},
   publisher    = {GitHub},
