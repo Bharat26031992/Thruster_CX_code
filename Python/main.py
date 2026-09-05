@@ -71,12 +71,12 @@ class PyInstallerWorker(QThread):
 
         cmd = [
             sys.executable, "-m", "PyInstaller",
-            "—onefile",
-            "—name",    script_name,
-            "—distpath", dist_dir,
-            "—workpath", work_dir,
-            "—specpath", build_dir,
-            "—noconfirm",
+            "--onefile",
+            "--name",    script_name,
+            "--distpath", dist_dir,
+            "--workpath", work_dir,
+            "--specpath", build_dir,
+            "--noconfirm",
             self._script_path,
         ]
 
@@ -1830,12 +1830,14 @@ class DigitalTwinApp(QMainWindow):
         self.scat_cex = self.ax_live.scatter([], [], c=[], s=3, cmap='turbo', vmin=0, vmax=max_v+300, alpha=1.0)
         self.scat_elec = self.ax_live.scatter([], [], s=1, c='#00FF00', alpha=0.8, zorder=5)
 
-        if not hasattr(self, "cax_live"):
-            divider = make_axes_locatable(self.ax_live)
-            self.cax_live = divider.append_axes("right", size="3%", pad=0.1)
-        else:
+        # Always destroy and recreate cax_live: reusing an axis whose divider
+        # relationship was broken by ax_live.clear() causes the colorbar to fill
+        # the entire figure on the next rebuild after a simulation has been run.
+        if hasattr(self, 'cax_live') and self.cax_live in self.fig.axes:
             self.cax_live.set_axes_locator(None)
-            self.cax_live.clear()
+            self.fig.delaxes(self.cax_live)
+        divider = make_axes_locatable(self.ax_live)
+        self.cax_live = divider.append_axes("right", size="3%", pad=0.1)
 
         self.cbar_energy = self.fig.colorbar(self.scat_prim, cax=self.cax_live)
         self.cbar_energy.ax.set_title("[eV]", fontsize=8, pad=3)
@@ -1858,12 +1860,12 @@ class DigitalTwinApp(QMainWindow):
                 self.sim.X, self.sim.Y, TdisplayC,
                 cmap="inferno", shading="nearest"
             )
-            if not hasattr(self, "cax_temp"):
-                dividert = make_axes_locatable(self.ax_temp)
-                self.cax_temp = dividert.append_axes("right", size="5%", pad=0.1)
-            else:
+            # Always destroy and recreate cax_temp for same reason as cax_live.
+            if hasattr(self, 'cax_temp') and self.cax_temp in self.fig.axes:
                 self.cax_temp.set_axes_locator(None)
-                self.cax_temp.clear()
+                self.fig.delaxes(self.cax_temp)
+            dividert = make_axes_locatable(self.ax_temp)
+            self.cax_temp = dividert.append_axes("right", size="5%", pad=0.1)
             self.cbartemp = self.fig.colorbar(self.tempmesh, cax=self.cax_temp)
             self.cbartemp.set_label("Temperature °C")
             self.ax_temp.set_xlim(0, self.sim.Lx)
@@ -2047,6 +2049,7 @@ class DigitalTwinApp(QMainWindow):
                     divider_t = make_axes_locatable(self.ax_temp)
                     self.cax_temp = divider_t.append_axes("right", size="5%", pad=0.1)
                 else:
+                    self.cax_temp.set_axes_locator(None)
                     self.cax_temp.clear()
 
                 self.cbar_temp = self.fig.colorbar(self.tempmesh, cax=self.cax_temp)
