@@ -2,11 +2,26 @@
 __pycache__/
 *.pyc
 
+# Virtual environments
+.venv/
+env/
+
 # PyInstaller build and distribution folders
 build/
 dist/
+output/
+_exe_build_tmp/
 *.spec
+
+# Large simulation output data and animations
+*.gif
+*.csv
+csv/
+results/
+backup/
+scratch/
+Original/
 
 # OS generated files
 .DS_Store
-Thumbs.db
+Thumbs.db

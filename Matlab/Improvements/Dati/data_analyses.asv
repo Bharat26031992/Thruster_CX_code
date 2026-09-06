@@ -1,0 +1,6 @@
+S = load('exit_energy_data1.mat');
+figure(21)
+plot(S.iter_history_out, S.mean_exit_energy_eV, 'LineWidth', 1.5);
+grid on;
+xlabel('Iteration');
+ylabel('95th percentile half-angle [deg]');
