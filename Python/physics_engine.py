@@ -437,6 +437,16 @@ class DigitalTwinSimulator:
         self.ppc_steps_count = 0
         self.current_ppc_map = np.zeros((self.ny, self.nx), dtype=int)
 
+        # Energy conservation tracking
+        self.energy_history_t    = []   # simulation time [s]
+        self.energy_history_ke_i = []   # ion kinetic energy [J]
+        self.energy_history_ke_e = []   # electron kinetic energy [J]
+        self.energy_history_fe   = []   # electrostatic field energy [J]
+        self.energy_history_tot  = []   # total energy [J]
+        self._prev_total_energy  = None # for step-to-step change detection
+        # Warning threshold: relative change in total energy per step (5%)
+        self.energy_warning_threshold = 0.05
+
     def _recompute_cell_constants(self):
         self.C_cell = self.mat_rho * (self.dx*1e-3) * (self.dy*1e-3) * 1e-3 * self.mat_cp
         self.A_cell = 2 * (self.dx*1e-3) * 1e-3
@@ -1786,6 +1796,74 @@ class DigitalTwinSimulator:
         if hasattr(self, 'current_ppc_map'):
             return self.current_ppc_map.astype(np.float64)
         return np.zeros((self.ny, self.nx), dtype=np.float64)
+
+    def get_total_energy(self):
+        """
+        Compute and store the instantaneous total energy of the PIC system:
+
+            E_total = E_kinetic_ions + E_kinetic_electrons + E_field
+
+        where:
+            E_kinetic_ions  = sum_p  0.5 * m_ion * (vx^2+vy^2+vz^2) * macro_weight
+            E_kinetic_electrons = sum_e  0.5 * m_e  * (vx^2+vy^2+vz^2) * macro_weight
+            E_field         = (eps0/2) * sum_cells (Ex^2 + Ey^2) * dx*dy*dz
+
+        Also appends results to the energy history and prints a terminal warning
+        if the total energy changes by more than `energy_warning_threshold` (5%) in a
+        single step, which signals a violation of energy conservation.
+
+        Returns
+        -------
+        dict with keys: t_s, ke_ions_J, ke_elec_J, field_J, total_J
+        """
+        t_now = self.iteration * self.dt
+
+        # --- Ion kinetic energy ---
+        if self.num_p > 0:
+            v2 = (self.p_vx[:self.num_p]**2
+                  + self.p_vy[:self.num_p]**2
+                  + self.p_vz[:self.num_p]**2)
+            ke_i = float(np.sum(v2)) * 0.5 * self.m_ion * self.macro_weight
+        else:
+            ke_i = 0.0
+
+        # --- Electron kinetic energy ---
+        # Electrons share the same macro_weight as ions (quasi-neutrality assumption)
+        if self.num_e > 0:
+            v2e = (self.e_vx[:self.num_e]**2
+                   + self.e_vy[:self.num_e]**2
+                   + self.e_vz[:self.num_e]**2)
+            ke_e = float(np.sum(v2e)) * 0.5 * self.m_e * self.macro_weight
+        else:
+            ke_e = 0.0
+
+        # --- Electrostatic field energy: (eps0/2) * integral(|E|^2) dV ---
+        # Cell volume uses 2D slice with unit depth of 1 m (standard 2D PIC convention)
+        cell_area = (self.dx * 1e-3) * (self.dy * 1e-3)  # [m^2]
+        e_field = float(np.sum(self.Ex**2 + self.Ey**2)) * 0.5 * self.eps0 * cell_area
+
+        total = ke_i + ke_e + e_field
+
+        # --- Step-to-step conservation warning ---
+        if self._prev_total_energy is not None and self._prev_total_energy > 0.0:
+            rel_change = abs(total - self._prev_total_energy) / self._prev_total_energy
+            if rel_change > self.energy_warning_threshold:
+                print(
+                    f"[Energy Warning] iter={self.iteration}: "
+                    f"total energy changed by {rel_change*100:.1f}% in one step "
+                    f"(prev={self._prev_total_energy:.4e} J, now={total:.4e} J). "
+                    f"KE_i={ke_i:.3e} J, KE_e={ke_e:.3e} J, E_field={e_field:.3e} J"
+                )
+        self._prev_total_energy = total
+
+        # Append to history
+        self.energy_history_t.append(t_now)
+        self.energy_history_ke_i.append(ke_i)
+        self.energy_history_ke_e.append(ke_e)
+        self.energy_history_fe.append(e_field)
+        self.energy_history_tot.append(total)
+
+        return dict(t_s=t_now, ke_ions_J=ke_i, ke_elec_J=ke_e, field_J=e_field, total_J=total)
 
     # —————————————————————————————————
     def get_third_grid_transparency_frame(self):
